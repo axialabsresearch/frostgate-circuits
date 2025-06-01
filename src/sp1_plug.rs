@@ -24,6 +24,7 @@ use std::time::{Instant, SystemTime};
 use tokio::sync::Semaphore;
 use std::fmt::{self, format};
 use std::time::Duration;
+use std::any::Any;
 
 
 /// SP1 proof types supported by this plug.
@@ -564,6 +565,10 @@ impl ZkPlug for Sp1Plug {
             active_tasks: max_concurrent - available_permits,
             queue_depth: 0, // Would need to track pending operations
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     async fn initialize(&mut self, _config: Option<&ZkConfig>) -> ZkResult<(), Self::Error> {
