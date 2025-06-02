@@ -1,18 +1,23 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_must_use)]
+#![allow(dead_code)]
+
 use std::collections::{HashMap, BTreeMap};
 use std::time::{SystemTime, Duration};
 use crate::sp1::types::{ProgramInfo, CacheConfig};
 
-#[derive(Debug)]
 pub struct ProgramCache {
     entries: HashMap<String, ProgramInfo>,
-    access_order: BTreeMap<SystemTime, String>, // For LRU tracking
+    access_order: BTreeMap<SystemTime, String>,
     config: CacheConfig,
 }
 
 impl ProgramCache {
     pub fn new(config: CacheConfig) -> Self {
         Self {
-            entries: HashMap::new(), 
+            entries: HashMap::new(),
             access_order: BTreeMap::new(),
             config,
         }
@@ -89,6 +94,10 @@ impl ProgramCache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn entries(&self) -> &HashMap<String, ProgramInfo> {
+        &self.entries
     }
 }
 

@@ -1,8 +1,20 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_must_use)]
+#![allow(dead_code)]
+
 use sha3::{Digest, Keccak256};
 use sp1_core_machine::io::SP1Stdin;
-use sp1_sdk::{SP1ProvingKey, SP1VerifyingKey};
-use crate::sp1::types::{ProgramInfo, Sp1PlugError, Sp1Backend};
+use sp1_sdk::{SP1ProvingKey, SP1VerifyingKey, Prover, SP1PublicValues, ExecutionReport, SP1ProofWithPublicValues};
+use sp1_prover::{SP1Groth16Bn254Proof, SP1PlonkBn254Proof};
+use frostgate_zkip::zkplug::{ExecutionResult, ExecutionStats, ZkProof, ProofMetadata};
+use std::time::Instant;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use crate::sp1::types::{ProgramInfo, Sp1PlugError, Sp1Backend, Sp1ProofType};
 use crate::sp1::utils::ProgramCache;
+use bincode;
 
 pub async fn setup_program(
     backend: &Sp1Backend,
@@ -60,17 +72,52 @@ pub async fn execute_program(
     backend: &Sp1Backend,
     elf: &[u8],
     stdin: &SP1Stdin,
-) -> Result<(Vec<u8>, sp1_sdk::SP1Report), Sp1PlugError> {
-    match backend {
+) -> Result<ExecutionResult<Sp1ProofType>, Sp1PlugError> {
+    let start = Instant::now();
+    let result = match backend {
         Sp1Backend::Local(prover) => {
             prover.execute(elf, stdin)
                 .run()
-                .map_err(|e| Sp1PlugError::Execution(format!("{:?}", e)))
+                .map_err(|e| Sp1PlugError::Execution(format!("{:?}", e)))?
         }
         Sp1Backend::Network(prover) => {
             prover.execute(elf, stdin)
                 .run()
-                .map_err(|e| Sp1PlugError::Execution(format!("{:?}", e)))
+                .map_err(|e| Sp1PlugError::Execution(format!("{:?}", e)))?
         }
-    }
+    };
+
+    let (public_values, report) = result;
+    let execution_time = start.elapsed();
+    
+    // Generate a real proof using the backend
+    let (proving_key, _) = match backend {
+        Sp1Backend::Local(prover) => prover.setup(elf),
+        Sp1Backend::Network(prover) => prover.setup(elf),
+    };
+    
+    let real_proof = generate_proof(backend, &proving_key, stdin).await?;
+    
+    let proof = ZkProof {
+        proof: Sp1ProofType::Core(real_proof),
+        metadata: ProofMetadata {
+            timestamp: std::time::SystemTime::now(),
+            generation_time: execution_time,
+            proof_size: 0,
+            backend_id: "sp1".to_string(),
+            circuit_hash: None,
+            custom_fields: HashMap::new(),
+        },
+    };
+    
+    Ok(ExecutionResult {
+        output: public_values.to_vec(),
+        stats: ExecutionStats {
+            steps: report.total_instruction_count() as u64,
+            memory_usage: (report.total_instruction_count() * 32) as usize, // Convert to usize
+            execution_time,
+            gas_used: Some(report.total_instruction_count() as u64),
+        },
+        proof,
+    })
 }

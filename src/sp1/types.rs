@@ -1,10 +1,17 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_must_use)]
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
-use sp1_core_machine::io::SP1Stdin;
 use sp1_sdk::{SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey};
 use sp1_prover::{SP1PlonkBn254Proof, SP1Groth16Bn254Proof};
+use frostgate_zkip::zkplug::ZkError;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::fmt;
+use std::collections::{HashMap, BTreeMap};
 
 /// SP1 proof types supported by this plug.
 #[derive(Clone, Serialize, Deserialize)]
@@ -100,9 +107,23 @@ pub enum Sp1PlugError {
     Unsupported(String),
 }
 
+impl From<ZkError> for Sp1PlugError {
+    fn from(e: ZkError) -> Self {
+        Sp1PlugError::Proof(e.to_string())
+    }
+}
+
 /// Backend wrapper for local or network proving
-#[derive(Debug)]
 pub enum Sp1Backend {
     Local(sp1_sdk::EnvProver),
     Network(sp1_sdk::NetworkProver),
+}
+
+impl fmt::Debug for Sp1Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Sp1Backend::Local(_) => write!(f, "Local(EnvProver)"),
+            Sp1Backend::Network(_) => write!(f, "Network(NetworkProver)"),
+        }
+    }
 }

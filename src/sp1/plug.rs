@@ -1,22 +1,33 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_must_use)]
+#![allow(dead_code)]
+
 use async_trait::async_trait;
-use frostgate_zkip::zkplug::*;
-use std::sync::{Arc, RwLock};
+use frostgate_zkip::zkplug::{
+    ZkPlug, ZkProof, ZkResult, ZkConfig, ZkCapability, BackendInfo,
+    HealthStatus, ResourceUsage, ExecutionResult, ProofMetadata,
+};
+use sp1_sdk::{SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey, Prover};
+use sp1_core_machine::io::SP1Stdin;
+use tokio::sync::{Semaphore, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 use std::collections::HashMap;
-use tokio::sync::Semaphore;
-use sp1_core_machine::io::SP1Stdin;
 use sp1_prover::{SP1Prover, components::CpuProverComponents};
+use tracing;
 use crate::sp1::{
-    types::*,
+    types::{Sp1Backend, Sp1PlugConfig, Sp1PlugError, Sp1ProofType, ProgramInfo},
     utils::{ProgramCache, validate_input},
     prover::{setup_program, generate_proof, execute_program},
-    verifier::verify_proof_unified,
+    verifier::verify_proof,
 };
 
 pub struct Sp1Plug {
-    backend: Sp1Backend,
     config: Sp1PlugConfig,
-    programs: RwLock<ProgramCache>,
+    backend: Sp1Backend,
+    programs: Arc<RwLock<ProgramCache>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -24,41 +35,48 @@ impl std::fmt::Debug for Sp1Plug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sp1Plug")
             .field("config", &self.config)
-            .field("program_count", &self.programs.read().unwrap().len())
+            .field("program_count", &self.programs.blocking_read().len())
             .finish()
     }
 }
 
 impl Sp1Plug {
-    pub fn new(config: Option<Sp1PlugConfig>) -> Self {
-        let config = config.unwrap_or_default();
+    pub fn new(config: Sp1PlugConfig) -> Self {
         let backend = if config.use_network {
-            let api_key = config
-                .network_api_key
-                .as_deref()
-                .unwrap_or_else(|| panic!("SP1 network API key required"));
-            let endpoint = config
-                .network_endpoint
-                .as_deref()
-                .unwrap_or("https://api.sp1.giza.io");
-            Sp1Backend::Network(sp1_sdk::NetworkProver::new(api_key, endpoint))
+            match (&config.network_api_key, &config.network_endpoint) {
+                (Some(api_key), Some(endpoint)) => {
+                    Sp1Backend::Network(sp1_sdk::NetworkProver::new(api_key, endpoint))
+                }
+                (Some(api_key), None) => {
+                    // Use default endpoint with API key
+                    tracing::warn!("Network proving requested but API key/endpoint missing. Falling back to local prover.");
+                    Sp1Backend::Network(sp1_sdk::NetworkProver::new(api_key, "https://sp1.proof.network"))
+                }
+                _ => {
+                    // Fallback to local if network config is incomplete
+                    tracing::warn!("Network proving requested but API key/endpoint missing. Falling back to local prover.");
+                    Sp1Backend::Local(sp1_sdk::EnvProver::new())
+                }
+            }
         } else {
             Sp1Backend::Local(sp1_sdk::EnvProver::new())
         };
+
         let max_concurrent = config.max_concurrent.unwrap_or_else(num_cpus::get);
         let cache_config = config.cache_config.clone();
+        
         Self {
-            backend,
             config,
-            programs: RwLock::new(ProgramCache::new(cache_config)),
+            backend,
+            programs: Arc::new(RwLock::new(ProgramCache::new(cache_config))),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
 
-    fn get_program_info(&self, hash: &str) -> Result<ProgramInfo, Sp1PlugError> {
+    async fn get_program_info(&self, hash: &str) -> Result<ProgramInfo, Sp1PlugError> {
         self.programs
             .write()
-            .unwrap()
+            .await
             .get(hash)
             .ok_or_else(|| Sp1PlugError::NotFound("Program not found".to_string()))
     }
@@ -78,96 +96,112 @@ impl ZkPlug for Sp1Plug {
     async fn prove(
         &self,
         input: &[u8],
-        public_inputs: Option<&[u8]>,
-        _config: Option<&ZkConfig>,
+        aux_input: Option<&[u8]>,
+        config: Option<&ZkConfig>,
     ) -> ZkResult<ZkProof<Self::Proof>, Self::Error> {
-        validate_input(input, Some(100 * 1024 * 1024))
+        validate_input(input, self.config.max_input_size)
             .map_err(|e| Sp1PlugError::Input(e.to_string()))?;
-        let program_hash = setup_program(&self.backend, &mut self.programs.write().unwrap(), input).await?;
-        let info = self.get_program_info(&program_hash)?;
 
-        let mut stdin = SP1Stdin::new();
-        if let Some(pub_inputs) = public_inputs {
-            stdin.write_slice(pub_inputs);
-        }
-
-        let _permit = self.semaphore.acquire().await.unwrap();
-        let start = Instant::now();
-
-        let proof = generate_proof(&self.backend, &info.proving_key, &stdin).await?;
-        let duration = start.elapsed();
-
-        let proof_type = Sp1ProofType::Core(proof);
-
-        let metadata = ProofMetadata {
-            timestamp: std::time::SystemTime::now(),
-            generation_time: duration,
-            proof_size: bincode::serialize(&proof_type).map(|v| v.len()).unwrap_or(0),
-            backend_id: self.id().to_string(),
-            circuit_hash: Some(program_hash),
-            custom_fields: HashMap::new(),
+        // First get the program hash
+        let program_hash = {
+            let mut programs = self.programs.write().await;
+            let hash = setup_program(&self.backend, &mut programs, input).await?;
+            hash
         };
 
+        // Then get program info with a read lock
+        let program_info = {
+            let programs = self.programs.read().await;
+            programs.entries()
+                .get(&program_hash)
+                .ok_or_else(|| Sp1PlugError::NotFound(format!("Program {} not found", program_hash)))?
+                .clone()
+        };
+
+        let _permit = self.semaphore.acquire().await.unwrap();
+        let mut stdin = SP1Stdin::new();
+        stdin.write_slice(input);
+        if let Some(aux) = aux_input {
+            stdin.write_slice(aux);
+        }
+        
+        let proof = generate_proof(&self.backend, &program_info.proving_key, &stdin).await?;
+        let start_time = Instant::now();
+        let proof_size = bincode::serialize(&proof).map(|v| v.len()).unwrap_or(0);
+
         Ok(ZkProof {
-            proof: proof_type,
-            metadata,
+            proof: Sp1ProofType::Core(proof),
+            metadata: ProofMetadata {
+                timestamp: std::time::SystemTime::now(),
+                generation_time: start_time.elapsed(),
+                proof_size,
+                backend_id: self.id().to_string(),
+                circuit_hash: Some(program_info.program_hash),
+                custom_fields: HashMap::new(),
+            },
         })
     }
 
     async fn verify(
         &self,
         proof: &ZkProof<Self::Proof>,
-        _public_inputs: Option<&[u8]>,
-        _config: Option<&ZkConfig>,
+        input: Option<&[u8]>,
+        config: Option<&ZkConfig>,
     ) -> ZkResult<bool, Self::Error> {
-        let program_hash = proof
-            .metadata
-            .circuit_hash
-            .as_ref()
-            .ok_or_else(|| Sp1PlugError::Input("Missing program hash".to_string()))?;
-        let info = self.get_program_info(program_hash)?;
+        if let Some(input) = input {
+            validate_input(input, self.config.max_input_size)
+                .map_err(|e| Sp1PlugError::Input(e.to_string()))?;
+        }
 
-        verify_proof_unified(&self.backend, &proof.proof, &info.verifying_key, self.get_build_dir()).await
+        // First get the program hash
+        let program_hash = if let Some(input) = input {
+            let mut programs = self.programs.write().await;
+            let hash = setup_program(&self.backend, &mut programs, input).await?;
+            hash
+        } else {
+            // If no input provided, use the first available program hash
+            let programs = self.programs.read().await;
+            programs.entries()
+                .keys()
+                .next()
+                .ok_or_else(|| Sp1PlugError::NotFound("No programs available".to_string()))?
+                .clone()
+        };
+
+        // Then get program info with a read lock
+        let program_info = {
+            let programs = self.programs.read().await;
+            programs.entries()
+                .get(&program_hash)
+                .ok_or_else(|| Sp1PlugError::NotFound(format!("Program {} not found", program_hash)))?
+                .clone()
+        };
+
+        let _permit = self.semaphore.acquire().await.unwrap();
+        verify_proof(&self.backend, &proof.proof, &program_info.verifying_key).await
     }
 
     async fn execute(
         &self,
-        program: &[u8],
         input: &[u8],
-        public_inputs: Option<&[u8]>,
-        _config: Option<&ZkConfig>,
+        program: &[u8],
+        aux_input: Option<&[u8]>,
+        config: Option<&ZkConfig>,
     ) -> ZkResult<ExecutionResult<Self::Proof>, Self::Error> {
-        let program_hash = setup_program(&self.backend, &mut self.programs.write().unwrap(), program).await?;
-        let info = self.get_program_info(&program_hash)?;
+        let _permit = self.semaphore.acquire().await.unwrap();
+        
+        validate_input(input, self.config.max_input_size)
+            .map_err(|e| Sp1PlugError::Input(e.to_string()))?;
 
         let mut stdin = SP1Stdin::new();
         stdin.write_slice(input);
-        if let Some(pub_inputs) = public_inputs {
-            stdin.write_slice(pub_inputs);
+        if let Some(aux) = aux_input {
+            stdin.write_slice(aux);
         }
 
-        let start = Instant::now();
-
-        let (output, report) = execute_program(&self.backend, &info.elf, &stdin).await?;
-        let exec_time = start.elapsed();
-
-        let stats = ExecutionStats {
-            steps: report.total_instruction_count() as u64,
-            memory_usage: 0,
-            execution_time: exec_time,
-            gas_used: Some(report.total_instruction_count() as u64),
-        };
-
-        let proof = self.prove(program, public_inputs, None).await?;
-
-        let output_bytes = bincode::serialize(&output)
-            .map_err(|e| Sp1PlugError::Execution(format!("Serialization error: {:?}", e)))?;
-
-        Ok(ExecutionResult {
-            output: output_bytes,
-            proof,
-            stats,
-        })
+        let result = execute_program(&self.backend, program, &stdin).await?;
+        
+        Ok(result)
     }
 
     async fn get_backend_info(&self) -> BackendInfo {
@@ -216,7 +250,7 @@ impl ZkPlug for Sp1Plug {
     }
 
     async fn get_resource_usage(&self) -> ResourceUsage {
-        let cache_len = self.programs.read().unwrap().len();
+        let cache_len = self.programs.read().await.len();
         let available_permits = self.semaphore.available_permits();
         let max_concurrent = self.config.max_concurrent.unwrap_or_else(num_cpus::get);
         
@@ -238,7 +272,7 @@ impl ZkPlug for Sp1Plug {
     }
 
     async fn shutdown(&mut self) -> ZkResult<(), Self::Error> {
-        self.programs.write().unwrap().clear();
+        self.programs.write().await.clear();
         Ok(())
     }
 }
