@@ -1,0 +1,44 @@
+// SP1 program for verifying Frostgate messages
+// Input format:
+// - from_chain: u64 (8 bytes)
+// - to_chain: u64 (8 bytes)
+// - payload: Vec<u8>
+// - nonce: u64 (8 bytes)
+// - timestamp: u64 (8 bytes)
+
+use sp1_zkvm::prelude::*;
+
+fn main() {
+    // Read input data
+    let mut input = sp1_zkvm::io::read_input();
+    
+    // Read chain IDs
+    let from_chain = input.read_u64();
+    let to_chain = input.read_u64();
+    
+    // Read payload length and payload
+    let payload_len = input.read_u64() as usize;
+    let mut payload = vec![0u8; payload_len];
+    for i in 0..payload_len {
+        payload[i] = input.read_u8();
+    }
+    
+    // Read nonce and timestamp
+    let nonce = input.read_u64();
+    let timestamp = input.read_u64();
+    
+    // Verify timestamp is reasonable
+    assert!(timestamp > 1600000000, "Invalid timestamp"); // After 2020
+    assert!(timestamp < 2000000000, "Invalid timestamp"); // Before 2033
+    
+    // Verify chain IDs are valid
+    assert!(from_chain <= 2, "Invalid from_chain"); // 0=ETH, 1=DOT, 2=SOL
+    assert!(to_chain <= 2, "Invalid to_chain");
+    assert!(from_chain != to_chain, "Same chain transfer not allowed");
+    
+    // Write public outputs
+    sp1_zkvm::io::write_public_output(&from_chain.to_be_bytes());
+    sp1_zkvm::io::write_public_output(&to_chain.to_be_bytes());
+    sp1_zkvm::io::write_public_output(&nonce.to_be_bytes());
+    sp1_zkvm::io::write_public_output(&timestamp.to_be_bytes());
+} 

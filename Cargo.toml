@@ -1,23 +1,45 @@
 [package]
 name = "frostgate-circuits"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+frostgate-zkip = { path = "../frostgate-zkip" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-frostgate-sdk = { path = "../frostgate-sdk" }
-frostgate-zkip = { path = "../frostgate-zkip" }
-uuid = { workspace = true }
-bincode.workspace = true
-tracing = "0.1.41"
-sp1-prover = "4.2.1"
-sp1-sdk = { version = "4.2.1", features = ["network"] }
-sp1-core-machine = "4.2.1"
-tokio.workspace = true
-async-trait.workspace = true
-sha3 = "0.10.8"
-num_cpus = "1.16.0"
-hex.workspace = true
+bincode = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+num_cpus = { workspace = true }
+
+# SP1 dependencies
+sp1-zkvm = { workspace = true, optional = true }
+sp1-core-machine = { version = "4.2.1", optional = true }
+sp1-sdk = { version = "4.2.1", optional = true, features = ["network"] }
+sp1-prover = { version = "4.2.1", optional = true }
+
+# Halo2 dependencies
+halo2_proofs = { version = "0.2", optional = true }
+halo2_gadgets = { version = "0.2", optional = true }
+
+# Groth16 dependencies
+ark-groth16 = { version = "0.3", optional = true }
+ark-bn254 = { version = "0.3", optional = true }
+
+# RISC0 dependencies
+risc0-zkvm = { version = "0.15", optional = true }
+risc0-zkp = { version = "0.15", optional = true }
+
+[features]
+default = ["sp1"]
+sp1 = ["sp1-zkvm", "sp1-core-machine", "sp1-sdk", "sp1-prover"]
+halo2 = ["halo2_proofs", "halo2_gadgets"]
+groth16 = ["ark-groth16", "ark-bn254"]
+risc0 = ["risc0-zkvm", "risc0-zkp"]
+all = ["sp1", "halo2", "groth16", "risc0"]

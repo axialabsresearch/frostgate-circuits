@@ -25,10 +25,10 @@ use crate::sp1::{
 };
 
 pub struct Sp1Plug {
-    config: Sp1PlugConfig,
-    backend: Sp1Backend,
-    programs: Arc<RwLock<ProgramCache>>,
-    semaphore: Arc<Semaphore>,
+    pub config: Sp1PlugConfig,
+    pub backend: Sp1Backend,
+    pub programs: Arc<RwLock<ProgramCache>>,
+    pub semaphore: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for Sp1Plug {
