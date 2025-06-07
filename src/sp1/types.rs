@@ -1,24 +1,27 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused_mut)]
-#![allow(unused_must_use)]
-#![allow(dead_code)]
+#![allow(unused_assignments)]
+#![allow(unused_parens)]
+#![allow(unused_braces)]
+#![allow(unused_macros)]
+#![allow(unused_imports)]
+
 
 use serde::{Deserialize, Serialize};
-use sp1_sdk::{SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey};
+use sp1_zkvm::{SP1ProofWithPublicValues, SP1ProvingKey, SP1VerifyingKey};
 use sp1_prover::{SP1PlonkBn254Proof, SP1Groth16Bn254Proof};
-use frostgate_zkip::zkplug::ZkError;
+use frostgate_lib::zkplug::ZkError;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::fmt;
 use std::collections::{HashMap, BTreeMap};
 
 /// SP1 proof types supported by this plug.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Sp1ProofType {
-    Core(SP1ProofWithPublicValues),
-    PlonkBn254(SP1PlonkBn254Proof),
-    Groth16Bn254(SP1Groth16Bn254Proof),
+    Plonk(Vec<u8>),
+    Groth16(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,25 +44,17 @@ impl Default for CacheConfig {
 /// SP1 plug configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sp1PlugConfig {
-    pub use_network: bool,
-    pub network_api_key: Option<String>,
-    pub network_endpoint: Option<String>,
     pub max_concurrent: Option<usize>,
-    pub build_dir: Option<PathBuf>,
-    pub max_input_size: Option<usize>,
-    pub cache_config: CacheConfig,
+    pub api_key: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 impl Default for Sp1PlugConfig {
     fn default() -> Self {
         Self {
-            use_network: false,
-            network_api_key: std::env::var("SP1_PRIVATE_KEY").ok(),
-            network_endpoint: None,
             max_concurrent: Some(num_cpus::get()),
-            build_dir: Some(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-            max_input_size: Some(100*1024*1024), // 100MB default
-            cache_config: CacheConfig::default(),
+            api_key: None,
+            endpoint: None,
         }
     }
 }
@@ -91,25 +86,32 @@ impl fmt::Debug for ProgramInfo {
 pub enum Sp1PlugError {
     #[error("SP1 key generation error: {0}")]
     KeyGen(String),
+    
     #[error("SP1 proof error: {0}")]
     Proof(String),
+    
     #[error("SP1 verification error: {0}")]
-    Verify(String),
+    Verification(String),
+    
     #[error("SP1 execution error: {0}")]
     Execution(String),
+    
     #[error("SP1 program not found: {0}")]
-    NotFound(String),
+    ProgramNotFound(String),
+    
     #[error("SP1 input error: {0}")]
     Input(String),
+    
     #[error("SP1 serialization error: {0}")]
     Serialization(String),
+    
     #[error("SP1 unsupported: {0}")]
     Unsupported(String),
 }
 
-impl From<ZkError> for Sp1PlugError {
-    fn from(e: ZkError) -> Self {
-        Sp1PlugError::Proof(e.to_string())
+impl From<Sp1PlugError> for ZkError {
+    fn from(err: Sp1PlugError) -> Self {
+        ZkError::Backend(err.to_string())
     }
 }
 

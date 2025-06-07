@@ -15,6 +15,35 @@ use std::path::PathBuf;
 use crate::sp1::types::{ProgramInfo, Sp1PlugError, Sp1Backend, Sp1ProofType};
 use crate::sp1::utils::ProgramCache;
 use bincode;
+use sp1_zkvm::SP1Stdin;
+use frostgate_lib::zkplug::*;
+
+pub struct Sp1Prover {
+    config: Sp1PlugConfig,
+}
+
+impl Sp1Prover {
+    pub fn new(config: Sp1PlugConfig) -> Self {
+        Self { config }
+    }
+
+    pub async fn prove(&self, program: &[u8], input: &[u8]) -> Result<Vec<u8>, Sp1PlugError> {
+        // Generate program hash for identification
+        let program_hash = hex::encode(Keccak256::digest(program));
+        
+        // Create stdin for the program
+        let mut stdin = SP1Stdin::new();
+        stdin.write(input);
+        
+        // Execute the program and generate proof
+        let proof = sp1_zkvm::prove(program, stdin)
+            .map_err(|e| Sp1PlugError::Proof(e.to_string()))?;
+            
+        // Serialize the proof
+        bincode::serialize(&proof)
+            .map_err(|e| Sp1PlugError::Serialization(e.to_string()))
+    }
+}
 
 pub async fn setup_program(
     backend: &Sp1Backend,

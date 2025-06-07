@@ -1,8 +1,11 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused_mut)]
-#![allow(unused_must_use)]
-#![allow(dead_code)]
+#![allow(unused_assignments)]
+#![allow(unused_parens)]
+#![allow(unused_braces)]
+#![allow(unused_macros)]
+#![allow(unused_imports)]
 
 use async_trait::async_trait;
 use frostgate_zkip::zkplug::{
@@ -23,12 +26,15 @@ use crate::sp1::{
     prover::{setup_program, generate_proof, execute_program},
     verifier::verify_proof,
 };
+use frostgate_lib::zkplug::*;
 
 pub struct Sp1Plug {
     pub config: Sp1PlugConfig,
     pub backend: Sp1Backend,
     pub programs: Arc<RwLock<ProgramCache>>,
     pub semaphore: Arc<Semaphore>,
+    pub prover: Arc<Sp1Prover>,
+    pub verifier: Arc<Sp1Verifier>,
 }
 
 impl std::fmt::Debug for Sp1Plug {
@@ -65,11 +71,17 @@ impl Sp1Plug {
         let max_concurrent = config.max_concurrent.unwrap_or_else(num_cpus::get);
         let cache_config = config.cache_config.clone();
         
+        let prover = Arc::new(Sp1Prover::new(config.clone()));
+        let verifier = Arc::new(Sp1Verifier::new(config.clone()));
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        
         Self {
             config,
             backend,
             programs: Arc::new(RwLock::new(ProgramCache::new(cache_config))),
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            semaphore,
+            prover,
+            verifier,
         }
     }
 
@@ -274,5 +286,22 @@ impl ZkPlug for Sp1Plug {
     async fn shutdown(&mut self) -> ZkResult<(), Self::Error> {
         self.programs.write().await.clear();
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ZkBackend for Sp1Plug {
+    type Error = Sp1PlugError;
+    
+    async fn prove(&self, program: &[u8], input: &[u8]) -> Result<Vec<u8>, Self::Error> {
+        let _permit = self.semaphore.acquire().await.map_err(|e| {
+            Sp1PlugError::Proof(format!("Failed to acquire semaphore: {}", e))
+        })?;
+        
+        self.prover.prove(program, input).await
+    }
+    
+    async fn verify(&self, program: &[u8], proof: &[u8]) -> Result<bool, Self::Error> {
+        self.verifier.verify(program, proof).await
     }
 }

@@ -8,6 +8,8 @@ use std::path::Path;
 use sp1_sdk::{SP1VerifyingKey, SP1ProofWithPublicValues, Prover};
 use sp1_prover::{SP1Prover, components::CpuProverComponents};
 use crate::sp1::types::{Sp1ProofType, Sp1PlugError, Sp1Backend};
+use sp1_zkvm::SP1ProofWithPublicValues;
+use frostgate_lib::zkplug::*;
 
 pub async fn verify_proof(
     backend: &Sp1Backend,
@@ -82,5 +84,25 @@ pub async fn verify_proof_unified(
             .map(|_| true)
             .map_err(|e| Sp1PlugError::Verify(format!("Groth16 verification failed: {:?}", e)))
         }
+    }
+}
+
+pub struct Sp1Verifier {
+    config: Sp1PlugConfig,
+}
+
+impl Sp1Verifier {
+    pub fn new(config: Sp1PlugConfig) -> Self {
+        Self { config }
+    }
+
+    pub async fn verify(&self, program: &[u8], proof: &[u8]) -> Result<bool, Sp1PlugError> {
+        // Deserialize the proof
+        let proof: SP1ProofWithPublicValues = bincode::deserialize(proof)
+            .map_err(|e| Sp1PlugError::Serialization(e.to_string()))?;
+            
+        // Verify the proof
+        sp1_zkvm::verify(program, &proof)
+            .map_err(|e| Sp1PlugError::Verification(e.to_string()))
     }
 }
