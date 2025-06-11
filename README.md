@@ -2,7 +2,7 @@
 
 Zero-knowledge proof circuit implementations for the Frostgate blockchain adapter system. This crate provides the core zero-knowledge proof functionality used to validate and verify blockchain state transitions.
 
-Frostgate's ZKIP allows implementation of new zk-backends using ZKPlug trait abstraction.
+Frostgate's ZKIP allows implementation of new ZK backends using the ZkBackend trait abstraction.
 
 ## Overview
 
@@ -25,11 +25,10 @@ The crate is organized into several modules:
 src/
 ├── lib.rs           # Library entry point and exports
 ├── sp1/             # SP1 zkVM implementation
-│   ├── plug.rs      # ZkPlug trait implementation
-│   ├── prover.rs    # Proof generation logic
+│   ├── backend.rs   # ZkBackend trait implementation
+│   ├── circuit.rs   # Circuit definitions
 │   ├── types.rs     # Core types and structures
-│   ├── utils.rs     # Utility functions
-│   └── verifier.rs  # Proof verification
+│   └── mod.rs       # Module exports
 └── tests/           # Integration tests
 ```
 
@@ -45,19 +44,19 @@ frostgate-circuits = { git = "https://github.com/frostgate/frostgate-circuits.gi
 Basic usage example:
 
 ```rust
-use frostgate_circuits::sp1::{Sp1Plug, Sp1PlugConfig};
+use frostgate_circuits::sp1::{Sp1Backend, Sp1Config};
 
 #[tokio::main]
 async fn main() {
-    // Initialize the SP1 plug
-    let config = Sp1PlugConfig::default();
-    let mut plug = Sp1Plug::new(config);
+    // Initialize the SP1 backend
+    let config = Sp1Config::default();
+    let backend = Sp1Backend::with_config(config);
 
     // Execute a program and generate proof
-    let result = plug.execute(program, input, None, None).await?;
+    let (proof, metadata) = backend.prove(program, input, None).await?;
 
     // Verify the proof
-    let is_valid = plug.verify(&result.proof, Some(input), None).await?;
+    let is_valid = backend.verify(program, &proof, None).await?;
 }
 ```
 
@@ -65,9 +64,9 @@ async fn main() {
 
 The system can be configured through various options:
 
-- Proving backend selection (local/network)
-- Concurrent proof generation limits
-- Cache settings
+- Maximum concurrent operations
+- Program cache size
+- GPU acceleration (if available)
 - Memory usage limits
 - Build directory location
 

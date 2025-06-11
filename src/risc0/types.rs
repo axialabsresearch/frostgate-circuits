@@ -1,0 +1,34 @@
+//! Type definitions for RISC0 backend
+
+use serde::{Serialize, Deserialize};
+use risc0_zkvm::{
+    Prover, ProverOpts,
+    Receipt, ReceiptMetadata,
+    ExecutorEnv,
+};
+
+/// RISC0 circuit trait
+pub trait Risc0Circuit: Send + Sync {
+    /// Get the ELF binary for this circuit
+    fn elf(&self) -> &[u8];
+    
+    /// Get the circuit's public inputs
+    fn public_inputs(&self) -> Vec<u32>;
+    
+    /// Get the circuit's private inputs
+    fn private_inputs(&self) -> Vec<u8>;
+    
+    /// Verify circuit-specific conditions in the receipt
+    fn verify_receipt(&self, receipt: &Receipt) -> bool;
+}
+
+/// RISC0-specific configuration options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Risc0Options {
+    /// Number of parallel proving threads
+    pub num_threads: Option<usize>,
+    /// Memory limit per proof in bytes
+    pub memory_limit: Option<usize>,
+    /// Custom proving parameters
+    pub prover_opts: Option<ProverOpts>,
+} 
