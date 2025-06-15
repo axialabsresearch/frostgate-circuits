@@ -55,19 +55,6 @@ impl Default for Risc0Config {
     }
 }
 
-/// RISC0 backend statistics
-#[derive(Debug, Default)]
-pub struct ZkStats {
-    /// Number of proofs generated
-    pub proofs_generated: u64,
-    /// Number of proofs verified
-    pub proofs_verified: u64,
-    /// Total proving time
-    pub total_proving_time: Duration,
-    /// Total verification time
-    pub total_verification_time: Duration,
-}
-
 /// RISC0 backend implementation
 #[derive(Debug)]
 pub struct Risc0Backend {
@@ -123,7 +110,7 @@ impl Risc0Backend {
 
     /// Update statistics after a proving operation
     async fn update_proving_stats(&self, duration: Duration, success: bool) {
-        let mut stats = self.stats.write().await;
+        let mut stats = self.stats.write();
         stats.proofs_generated += 1;
         if !success {
             stats.proofs_verified += 1;
@@ -135,7 +122,7 @@ impl Risc0Backend {
 
     /// Update statistics after a verification operation
     async fn update_verification_stats(&self, duration: Duration, success: bool) {
-        let mut stats = self.stats.write().await;
+        let mut stats = self.stats.write();
         stats.proofs_verified += 1;
         if !success {
             stats.proofs_verified += 1;
@@ -223,7 +210,7 @@ impl Risc0Backend {
             .map_err(|e| CustomZkError::ProofGeneration(format!("Failed to generate proof: {}", e)))?;
 
         // Update statistics
-        let mut stats = self.stats.write().await;
+        let mut stats = self.stats.write();
         stats.proofs_generated += 1;
         stats.total_proving_time += start.elapsed().unwrap_or_default();
 
@@ -243,7 +230,7 @@ impl Risc0Backend {
         let is_valid = circuit.verify_receipt(&receipt);
 
         // Update statistics
-        let mut stats = self.stats.write().await;
+        let mut stats = self.stats.write();
         stats.proofs_verified += 1;
         stats.total_verification_time += start.elapsed().unwrap_or_default();
 
@@ -300,7 +287,7 @@ impl ZkBackend for Risc0Backend {
         
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks += 1;
         }
 
@@ -344,7 +331,7 @@ impl ZkBackend for Risc0Backend {
         
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks -= 1;
         }
 
@@ -361,7 +348,7 @@ impl ZkBackend for Risc0Backend {
         
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks += 1;
         }
 
@@ -380,7 +367,7 @@ impl ZkBackend for Risc0Backend {
         
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks -= 1;
         }
 
@@ -389,12 +376,12 @@ impl ZkBackend for Risc0Backend {
 
     fn resource_usage(&self) -> ResourceUsage {
         futures::executor::block_on(async {
-            self.resources.read().await.clone()
+            self.resources.read().clone()
         })
     }
 
     async fn health_check(&self) -> HealthStatus {
-        let resources = self.resources.read().await;
+        let resources = self.resources.read().clone();
         if resources.cpu_usage > 90.0 {
             HealthStatus::Degraded("High CPU usage".into())
         } else if resources.memory_usage > self.options.memory_limit.unwrap_or(usize::MAX) {
@@ -420,7 +407,7 @@ impl ZkBackendExt for Risc0Backend {
 
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks += programs.len();
             resources.queue_depth = programs.len();
         }
@@ -469,7 +456,7 @@ impl ZkBackendExt for Risc0Backend {
 
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks -= programs.len();
             resources.queue_depth = 0;
         }
@@ -491,7 +478,7 @@ impl ZkBackendExt for Risc0Backend {
 
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks += verifications.len();
             resources.queue_depth = verifications.len();
         }
@@ -517,7 +504,7 @@ impl ZkBackendExt for Risc0Backend {
 
         // Update resource tracking
         {
-            let mut resources = self.resources.write().await;
+            let mut resources = self.resources.write();
             resources.active_tasks -= verifications.len();
             resources.queue_depth = 0;
         }
