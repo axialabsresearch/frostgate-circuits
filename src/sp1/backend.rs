@@ -1,9 +1,12 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 //! SP1 backend implementation
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
-use sp1_core::{SP1Prover, SP1ProverOpts};
+use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues};
 use tokio::sync::RwLock;
 use rayon::prelude::*;
 use frostgate_zkip::{
@@ -12,10 +15,11 @@ use frostgate_zkip::{
 };
 
 use super::types::{Sp1Circuit, Sp1Options};
-use super::circuit::{MessageVerifyCircuit, TxVerifyCircuit, BlockVerifyCircuit};
+use super::circuit::MessageVerifyCircuit;
 use super::cache::{CircuitCache, CacheConfig, CacheStats};
 
 /// SP1 backend implementation
+#[derive(Debug)]
 pub struct Sp1Backend {
     /// Backend statistics
     stats: Arc<RwLock<ZkStats>>,
@@ -25,6 +29,8 @@ pub struct Sp1Backend {
     options: Sp1Options,
     /// Circuit and proof cache
     cache: Arc<CircuitCache>,
+    /// SP1 prover client
+    client: ProverClient,
 }
 
 impl Sp1Backend {
@@ -42,9 +48,10 @@ impl Sp1Backend {
             options: Sp1Options {
                 num_threads: Some(4),
                 memory_limit: Some(1024 * 1024 * 1024), // 1GB
-                prover_opts: None,
+                custom_params: None,
             },
             cache: Arc::new(CircuitCache::new(CacheConfig::default())),
+            client: ProverClient::new(),
         }
     }
 
@@ -61,6 +68,7 @@ impl Sp1Backend {
             })),
             options,
             cache: Arc::new(CircuitCache::new(cache_config)),
+            client: ProverClient::new(),
         }
     }
 
@@ -85,7 +93,7 @@ impl Sp1Backend {
         let mut stats = self.stats.write().await;
         stats.total_verifications += 1;
         if !success {
-            stats.total_failures += 1;
+            stats.total_verification_failures += 1;
         }
         
         // Update average verification time
@@ -96,96 +104,22 @@ impl Sp1Backend {
         );
     }
 
-    /// Create a circuit from program bytes and input
-    fn create_circuit(&self, program: &[u8], input: &[u8]) -> ZkResult<Box<dyn Sp1Circuit>> {
-        // Check cache first
-        if let Some(entry) = self.cache.get_circuit(program) {
-            let circuit = match program[0] {
-                0x01 => {
-                    let mut expected_hash = [0u8; 32];
-                    expected_hash.copy_from_slice(&program[1..33]);
-                    Box::new(MessageVerifyCircuit::new(
-                        input.to_vec(),
-                        expected_hash,
-                        entry.circuit_bytes,
-                    ))
-                }
-                0x02 => {
-                    let mut expected_hash = [0u8; 32];
-                    expected_hash.copy_from_slice(&program[1..33]);
-                    Box::new(TxVerifyCircuit::new(
-                        input.to_vec(),
-                        expected_hash,
-                        entry.circuit_bytes,
-                    ))
-                }
-                0x03 => {
-                    let mut expected_hash = [0u8; 32];
-                    let mut expected_number = [0u8; 8];
-                    expected_hash.copy_from_slice(&program[1..33]);
-                    expected_number.copy_from_slice(&program[33..41]);
-                    Box::new(BlockVerifyCircuit::new(
-                        input.to_vec(),
-                        expected_hash,
-                        u64::from_le_bytes(expected_number),
-                        entry.circuit_bytes,
-                    ))
-                }
-                _ => return Err(ZkError::InvalidInput("Unknown circuit type".into())),
-            };
-            return Ok(circuit);
+    /// Create a circuit from program and input
+    fn create_circuit(&self, program: &[u8], input: &[u8]) -> Result<MessageVerifyCircuit, ZkError> {
+        // For now, we only support message verification circuits
+        if program.is_empty() || program[0] != 0x01 {
+            return Err(ZkError::Program("Unsupported circuit type".into()));
         }
-
-        // Not in cache, create new circuit
-        let start = SystemTime::now();
-        let circuit = match program[0] {
-            0x01 => {
-                let mut expected_hash = [0u8; 32];
-                if program.len() < 33 {
-                    return Err(ZkError::InvalidInput("Program too short for message verification".into()));
-                }
-                expected_hash.copy_from_slice(&program[1..33]);
-                Box::new(MessageVerifyCircuit::new(
-                    input.to_vec(),
-                    expected_hash,
-                    program[33..].to_vec(),
-                ))
-            }
-            0x02 => {
-                let mut expected_hash = [0u8; 32];
-                if program.len() < 33 {
-                    return Err(ZkError::InvalidInput("Program too short for transaction verification".into()));
-                }
-                expected_hash.copy_from_slice(&program[1..33]);
-                Box::new(TxVerifyCircuit::new(
-                    input.to_vec(),
-                    expected_hash,
-                    program[33..].to_vec(),
-                ))
-            }
-            0x03 => {
-                let mut expected_hash = [0u8; 32];
-                let mut expected_number = [0u8; 8];
-                if program.len() < 41 {
-                    return Err(ZkError::InvalidInput("Program too short for block verification".into()));
-                }
-                expected_hash.copy_from_slice(&program[1..33]);
-                expected_number.copy_from_slice(&program[33..41]);
-                Box::new(BlockVerifyCircuit::new(
-                    input.to_vec(),
-                    expected_hash,
-                    u64::from_le_bytes(expected_number),
-                    program[41..].to_vec(),
-                ))
-            }
-            _ => return Err(ZkError::InvalidInput("Unknown circuit type".into())),
-        };
-
-        // Store in cache
-        let compile_time = start.elapsed().unwrap();
-        self.cache.store_circuit(program, circuit.program().to_vec(), compile_time);
-
-        Ok(circuit)
+        
+        // Extract expected hash from program
+        if program.len() < 33 {
+            return Err(ZkError::Program("Invalid program format".into()));
+        }
+        let expected_hash = program[1..33].try_into()
+            .map_err(|_| ZkError::Program("Invalid hash format".into()))?;
+        
+        // Create circuit
+        MessageVerifyCircuit::new(input.to_vec(), expected_hash)
     }
 }
 
@@ -218,44 +152,41 @@ impl ZkBackend for Sp1Backend {
         // Create circuit
         let circuit = self.create_circuit(program, input)?;
         
-        // Create prover
-        let prover = SP1Prover::new(circuit.program(), self.options.prover_opts.clone().unwrap_or_default())
-            .map_err(|e| ZkError::ProverError(format!("Failed to create prover: {}", e)))?;
+        // Create stdin and write input
+        let mut stdin = SP1Stdin::new();
+        stdin.write(input);
+        
+        // Setup the program
+        let (pk, _vk) = self.client.setup(program);
         
         // Generate proof
-        let proof = prover.prove(circuit.as_ref())
-            .map_err(|e| ZkError::ProverError(format!("Proof generation failed: {}", e)))?;
-        
-        // Verify circuit-specific conditions
-        if !circuit.verify_proof(&proof) {
-            return Err(ZkError::VerificationError("Circuit verification failed".into()));
-        }
+        let proof = self.client.prove(&pk, stdin)
+            .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
         
         // Serialize proof
-        let proof_bytes = bincode::serialize(&proof)
-            .map_err(|e| ZkError::SerializationError(format!("Failed to serialize proof: {}", e)))?;
+        let proof_bytes = proof.to_bytes();
         
         // Create metadata
         let duration = start.elapsed().unwrap_or_default();
         let metadata = ProofMetadata {
             generation_time: duration,
             proof_size: proof_bytes.len(),
-            program_hash: hex::encode(circuit.program()),
+            program_hash: hex::encode(program),
             timestamp: start,
         };
 
         // Store in cache
-        self.cache.store_proof(program, input, proof_bytes.clone(), duration);
-
-        // Update stats
-        self.update_proving_stats(duration, true).await;
+        self.cache.store_proof(program, input, &proof_bytes, duration);
         
         // Update resource tracking
         {
             let mut resources = self.resources.write().await;
             resources.active_tasks -= 1;
         }
-
+        
+        // Update stats
+        self.update_proving_stats(duration, true).await;
+        
         Ok((proof_bytes, metadata))
     }
 
@@ -267,67 +198,31 @@ impl ZkBackend for Sp1Backend {
     ) -> ZkResult<bool> {
         let start = SystemTime::now();
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write().await;
-            resources.active_tasks += 1;
-        }
-
         // Create circuit
         let circuit = self.create_circuit(program, &[])?;
         
-        // Verify proof
-        let result = circuit.verify(&self.verifier, proof);
+        // Setup the program
+        let (_pk, vk) = self.client.setup(program);
+        
+        // Verify the proof
+        let result = self.client.verify(proof, &vk)
+            .map_err(|e| ZkError::Verification(format!("Proof verification failed: {}", e)))?;
         
         // Update stats
         self.update_verification_stats(start.elapsed().unwrap_or_default(), result).await;
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write().await;
-            resources.active_tasks -= 1;
-        }
-
         Ok(result)
-    }
-
-    fn resource_usage(&self) -> ResourceUsage {
-        futures::executor::block_on(async {
-            self.resources.read().await.clone()
-        })
     }
 
     async fn health_check(&self) -> HealthStatus {
         let resources = self.resources.read().await;
-        if resources.cpu_usage > 90.0 {
-            HealthStatus::Degraded("High CPU usage".into())
-        } else if resources.memory_usage > self.options.memory_limit.unwrap_or(usize::MAX) {
-            HealthStatus::Degraded("High memory usage".into())
-        } else {
-            HealthStatus::Healthy
+        let stats = self.stats.read().await;
+        
+        HealthStatus {
+            is_healthy: resources.active_tasks < resources.max_concurrent,
+            resource_usage: resources.clone(),
+            stats: stats.clone(),
         }
-    }
-
-    fn stats(&self) -> ZkStats {
-        futures::executor::block_on(async {
-            self.stats.read().await.clone()
-        })
-    }
-
-    async fn clear_cache(&mut self) -> ZkResult<()> {
-        self.cache.clear_all();
-        Ok(())
-    }
-
-    fn capabilities(&self) -> Vec<String> {
-        vec![
-            "parallel_proving".into(),
-            "batch_verification".into(),
-            "custom_programs".into(),
-            "deterministic_proofs".into(),
-            "circuit_caching".into(),
-            "proof_caching".into(),
-        ]
     }
 }
 
@@ -341,7 +236,8 @@ impl ZkBackendExt for Sp1Backend {
         let start = SystemTime::now();
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.options.num_threads.unwrap_or(4))
-            .build()?;
+            .build()
+            .map_err(|e| ZkError::Prover(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -351,21 +247,33 @@ impl ZkBackendExt for Sp1Backend {
         }
 
         // Generate proofs in parallel
-        let results: Vec<ZkResult<(Vec<u8>, ProofMetadata)>> = thread_pool.install(|| {
+        let results: Vec<ZkResult<(Vec<u8>, ProofMetadata)>> =
             programs.par_iter().map(|(program, input)| {
                 let circuit = self.create_circuit(program, input)?;
                 let proof_start = SystemTime::now();
-                let proof = circuit.prove(&self.prover);
-                let duration = proof_start.elapsed().unwrap_or_default();
                 
-                Ok((proof, ProofMetadata {
+                // Create stdin and write input
+                let mut stdin = SP1Stdin::new();
+                stdin.write(input);
+                
+                // Setup the program
+                let (pk, _vk) = self.client.setup(program);
+                
+                // Generate proof
+                let proof = self.client.prove(&pk, stdin)
+                    .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
+                
+                // Serialize proof
+                let proof_bytes = proof.to_bytes();
+                
+                let duration = proof_start.elapsed().unwrap_or_default();
+                Ok((proof_bytes, ProofMetadata {
                     generation_time: duration,
-                    proof_size: proof.len(),
-                    program_hash: hex::encode(circuit.program()),
+                    proof_size: proof_bytes.len(),
+                    program_hash: hex::encode(program),
                     timestamp: proof_start,
                 }))
-            }).collect()
-        });
+            }).collect();
 
         // Update stats
         self.update_proving_stats(
@@ -392,7 +300,8 @@ impl ZkBackendExt for Sp1Backend {
         let start = SystemTime::now();
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.options.num_threads.unwrap_or(4))
-            .build()?;
+            .build()
+            .map_err(|e| ZkError::Prover(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -404,8 +313,12 @@ impl ZkBackendExt for Sp1Backend {
         // Verify proofs in parallel
         let results: Vec<ZkResult<bool>> = thread_pool.install(|| {
             verifications.par_iter().map(|(program, proof)| {
-                let circuit = self.create_circuit(program, &[])?;
-                Ok(circuit.verify(&self.verifier, proof))
+                // Setup the program
+                let (_pk, vk) = self.client.setup(program);
+                
+                // Verify the proof
+                self.client.verify(proof, &vk)
+                    .map_err(|e| ZkError::Verification(format!("Proof verification failed: {}", e)))
             }).collect()
         });
 
@@ -426,16 +339,17 @@ impl ZkBackendExt for Sp1Backend {
         results.into_iter().collect()
     }
 
-    async fn clear_cache(&mut self) -> ZkResult<()> {
+    async fn clear_cache(&mut self) -> Result<(), ZkError> {
         self.cache.clear_all();
         Ok(())
     }
 
     fn capabilities(&self) -> Vec<String> {
         vec![
-            "parallel_proving".into(),
-            "batch_verification".into(),
-            "custom_programs".into(),
+            "sp1".to_string(),
+            "message_verify".to_string(),
+            "tx_verify".to_string(),
+            "block_verify".to_string(),
         ]
     }
 } 

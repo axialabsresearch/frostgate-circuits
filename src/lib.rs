@@ -1,3 +1,6 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 //! Zero-knowledge circuit implementations for Frostgate
 //!
 //! This crate provides implementations of various zero-knowledge proof systems
@@ -6,6 +9,7 @@
 // Backend implementations
 pub mod sp1;
 pub mod risc0;
+pub mod error;
 
 // Re-export core types from zkip
 pub use frostgate_zkip::{
@@ -16,6 +20,8 @@ pub use frostgate_zkip::{
 // Re-export backend implementations
 pub use sp1::Sp1Backend;
 pub use risc0::Risc0Backend;
+
+pub use error::ZkError;
 
 #[cfg(test)]
 mod tests {

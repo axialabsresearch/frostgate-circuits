@@ -1,9 +1,12 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 //! Type definitions for RISC0 backend
 
 use serde::{Serialize, Deserialize};
 use risc0_zkvm::{
     Prover, ProverOpts,
-    Receipt, ReceiptMetadata,
+    Receipt,
     ExecutorEnv,
 };
 
@@ -30,5 +33,5 @@ pub struct Risc0Options {
     /// Memory limit per proof in bytes
     pub memory_limit: Option<usize>,
     /// Custom proving parameters
-    pub prover_opts: Option<ProverOpts>,
+    pub custom_params: Option<Vec<u8>>,
 } 

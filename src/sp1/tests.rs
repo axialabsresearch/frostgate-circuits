@@ -1,3 +1,6 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 //! Tests for SP1 backend implementation
 
 use super::*;
@@ -13,12 +16,14 @@ async fn test_message_verification() {
     
     // Create test message and hash
     let message = b"Hello, World!".to_vec();
-    let expected_hash = sp1_core::utils::hash_bytes(&message);
+    let mut hasher = Sha256::new();
+    hasher.update(&message);
+    let expected_hash = hasher.finalize().into();
     
     // Create program (contains expected hash)
-    let mut program = Vec::with_capacity(64);
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(&[0x01; 32]); // Circuit type 1
     
     // Generate proof
     let (proof, metadata) = backend.prove(&program, &message, None)
@@ -43,9 +48,9 @@ async fn test_invalid_message() {
     let wrong_hash = [0u8; 32];
     
     // Create program with wrong hash
-    let mut program = Vec::with_capacity(64);
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&wrong_hash);
-    program.extend_from_slice(&[0x01; 32]);
     
     // Generate proof
     let (proof, _) = backend.prove(&program, &message, None)
@@ -169,12 +174,12 @@ async fn test_circuit_caching() {
     let message = b"Hello, World!";
     let mut hasher = Sha256::new();
     hasher.update(message);
-    let expected_hash = hasher.finalize();
+    let expected_hash = hasher.finalize().into();
     
     // Create program bytes
-    let mut program = vec![0x01];
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/sp1/message_verify.sp1"));
     
     // First proof generation (should compile and cache circuit)
     let (proof1, metadata1) = backend.prove(&program, message, None).await.unwrap();
@@ -210,12 +215,12 @@ async fn test_proof_caching() {
     let message = b"Hello, World!";
     let mut hasher = Sha256::new();
     hasher.update(message);
-    let expected_hash = hasher.finalize();
+    let expected_hash = hasher.finalize().into();
     
     // Create program bytes
-    let mut program = vec![0x01];
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/sp1/message_verify.sp1"));
     
     // First proof generation
     let (proof1, metadata1) = backend.prove(&program, message, None).await.unwrap();
@@ -251,12 +256,12 @@ async fn test_cache_expiration() {
     let message = b"Hello, World!";
     let mut hasher = Sha256::new();
     hasher.update(message);
-    let expected_hash = hasher.finalize();
+    let expected_hash = hasher.finalize().into();
     
     // Create program bytes
-    let mut program = vec![0x01];
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/sp1/message_verify.sp1"));
     
     // First proof generation
     let (proof1, metadata1) = backend.prove(&program, message, None).await.unwrap();
@@ -333,12 +338,12 @@ async fn test_cache_clear() {
     let message = b"Hello, World!";
     let mut hasher = Sha256::new();
     hasher.update(message);
-    let expected_hash = hasher.finalize();
+    let expected_hash = hasher.finalize().into();
     
     // Create program bytes
-    let mut program = vec![0x01];
+    let mut program = Vec::with_capacity(33);
+    program.push(0x01); // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/sp1/message_verify.sp1"));
     
     // Generate first proof
     let (proof1, metadata1) = backend.prove(&program, message, None).await.unwrap();

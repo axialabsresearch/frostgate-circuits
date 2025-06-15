@@ -1,16 +1,20 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 //! Cache implementation for SP1 circuits and proofs
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use parking_lot::RwLock;
 use lru::LruCache;
+use std::num::NonZeroUsize;
 use sha2::{Sha256, Digest};
-use sp1_core::{SP1Prover, SP1ProverOpts};
+use sp1_prover::SP1Prover;
 
 use super::types::Sp1Circuit;
 
 /// Cache entry for a compiled circuit
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CircuitCacheEntry {
     /// Compiled circuit bytes
     pub circuit_bytes: Vec<u8>,
@@ -25,7 +29,7 @@ pub struct CircuitCacheEntry {
 }
 
 /// Cache entry for a proof
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProofCacheEntry {
     /// Proof bytes
     pub proof: Vec<u8>,
@@ -66,6 +70,7 @@ impl Default for CacheConfig {
 }
 
 /// Circuit and proof cache
+#[derive(Debug)]
 pub struct CircuitCache {
     /// Cached compiled circuits
     circuits: RwLock<LruCache<[u8; 32], CircuitCacheEntry>>,
@@ -79,41 +84,31 @@ impl CircuitCache {
     /// Create a new circuit cache with the given configuration
     pub fn new(config: CacheConfig) -> Self {
         Self {
-            circuits: RwLock::new(LruCache::new(config.max_circuits)),
-            proofs: RwLock::new(LruCache::new(config.max_proofs)),
+            circuits: RwLock::new(LruCache::new(NonZeroUsize::new(config.max_circuits).unwrap())),
+            proofs: RwLock::new(LruCache::new(NonZeroUsize::new(config.max_proofs).unwrap())),
             config,
         }
     }
 
     /// Get circuit bytes from cache
     pub fn get_circuit(&self, program: &[u8]) -> Option<CircuitCacheEntry> {
-        let mut hasher = Sha256::new();
-        hasher.update(program);
-        let hash = hasher.finalize().into();
-
+        let hash = self.hash_program(program);
         let mut circuits = self.circuits.write();
-        if let Some(entry) = circuits.get(&hash).cloned() {
-            if entry.last_access.elapsed().unwrap() < self.config.max_age {
-                let mut updated = entry.clone();
-                updated.last_access = SystemTime::now();
-                updated.access_count += 1;
-                circuits.put(hash, updated.clone());
-                Some(updated)
-            } else {
-                circuits.pop(&hash);
-                None
+        
+        if let Some(entry) = circuits.get(&hash) {
+            if let Ok(age) = SystemTime::now().duration_since(entry.last_access) {
+                if age < self.config.max_age {
+                    return Some(entry.clone());
+                }
             }
-        } else {
-            None
+            circuits.pop(&hash);
         }
+        None
     }
 
     /// Store circuit bytes in cache
     pub fn store_circuit(&self, program: &[u8], circuit_bytes: Vec<u8>, compile_time: Duration) {
-        let mut hasher = Sha256::new();
-        hasher.update(program);
-        let hash = hasher.finalize().into();
-
+        let hash = self.hash_program(program);
         let entry = CircuitCacheEntry {
             circuit_bytes,
             hash,
@@ -121,7 +116,6 @@ impl CircuitCache {
             access_count: 1,
             compile_time,
         };
-
         self.circuits.write().put(hash, entry);
     }
 
@@ -131,26 +125,18 @@ impl CircuitCache {
             return None;
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(program);
-        hasher.update(input);
-        let hash = hasher.finalize().into();
-
+        let hash = self.hash_program(program);
         let mut proofs = self.proofs.write();
-        if let Some(entry) = proofs.get(&hash).cloned() {
-            if entry.last_access.elapsed().unwrap() < self.config.max_age {
-                let mut updated = entry.clone();
-                updated.last_access = SystemTime::now();
-                updated.access_count += 1;
-                proofs.put(hash, updated.clone());
-                Some(updated)
-            } else {
-                proofs.pop(&hash);
-                None
+        
+        if let Some(entry) = proofs.get(&hash) {
+            if let Ok(age) = SystemTime::now().duration_since(entry.last_access) {
+                if age < self.config.max_age {
+                    return Some(entry.clone());
+                }
             }
-        } else {
-            None
+            proofs.pop(&hash);
         }
+        None
     }
 
     /// Store proof in cache
@@ -165,46 +151,40 @@ impl CircuitCache {
             return;
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(program);
-        let program_hash = hasher.finalize().into();
-
-        let mut hasher = Sha256::new();
-        hasher.update(input);
-        let input_hash = hasher.finalize().into();
-
-        let mut hasher = Sha256::new();
-        hasher.update(program);
-        hasher.update(input);
-        let hash = hasher.finalize().into();
-
+        let hash = self.hash_program(program);
         let entry = ProofCacheEntry {
             proof,
-            program_hash,
-            input_hash,
+            program_hash: hash,
+            input_hash: self.hash_program(input),
             generation_time,
             last_access: SystemTime::now(),
             access_count: 1,
         };
-
         self.proofs.write().put(hash, entry);
     }
 
     /// Clear expired cache entries
     pub fn clear_expired(&self) {
         let now = SystemTime::now();
-        
         // Clear expired circuits
         let mut circuits = self.circuits.write();
-        circuits.retain(|_, entry| {
-            entry.last_access.elapsed().unwrap() < self.config.max_age
-        });
-
+        let max_age = self.config.max_age;
+        let keys_to_remove: Vec<_> = circuits.iter()
+            .filter(|(_, entry)| entry.last_access.elapsed().unwrap() >= max_age)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys_to_remove {
+            circuits.pop(&k);
+        }
         // Clear expired proofs
         let mut proofs = self.proofs.write();
-        proofs.retain(|_, entry| {
-            entry.last_access.elapsed().unwrap() < self.config.max_age
-        });
+        let keys_to_remove: Vec<_> = proofs.iter()
+            .filter(|(_, entry)| entry.last_access.elapsed().unwrap() >= max_age)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys_to_remove {
+            proofs.pop(&k);
+        }
     }
 
     /// Clear all cache entries
@@ -226,6 +206,14 @@ impl CircuitCache {
             circuit_hits: circuits.iter().map(|e| e.1.access_count).sum(),
             proof_hits: proofs.iter().map(|e| e.1.access_count).sum(),
         }
+    }
+
+    fn hash_program(&self, program: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(program);
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hasher.finalize());
+        hash
     }
 }
 

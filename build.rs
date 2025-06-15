@@ -1,44 +1,31 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 use std::env;
+use std::path::PathBuf;
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 fn main() {
-    // Create target directory for RISC0 ELF files
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let target_dir = Path::new(&out_dir).join("riscv");
-    fs::create_dir_all(&target_dir).unwrap();
-
-    // Build message verification circuit
     println!("cargo:rerun-if-changed=circuits/message_verify.rs");
-    let status = Command::new("risc0-build")
-        .arg("circuits/message_verify.rs")
-        .arg("-o")
-        .arg(target_dir.join("message_verify.elf"))
-        .status()
-        .expect("Failed to build message verification circuit");
-    assert!(status.success());
 
-    // Build transaction verification circuit
-    println!("cargo:rerun-if-changed=circuits/tx_verify.rs");
-    let status = Command::new("risc0-build")
-        .arg("circuits/tx_verify.rs")
-        .arg("-o")
-        .arg(target_dir.join("tx_verify.elf"))
-        .status()
-        .expect("Failed to build transaction verification circuit");
-    assert!(status.success());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let circuits_dir = PathBuf::from("circuits");
+    
+    // Create programs directory if it doesn't exist
+    let programs_dir = PathBuf::from("programs");
+    fs::create_dir_all(&programs_dir).expect("Failed to create programs directory");
 
-    // Build block verification circuit
-    println!("cargo:rerun-if-changed=circuits/block_verify.rs");
-    let status = Command::new("risc0-build")
-        .arg("circuits/block_verify.rs")
-        .arg("-o")
-        .arg(target_dir.join("block_verify.elf"))
-        .status()
-        .expect("Failed to build block verification circuit");
-    assert!(status.success());
+    // Compile circuits for each chain
+    let chains = ["eth", "dot", "sol"];
+    for chain in chains.iter() {
+        let verifier_path = programs_dir.join(format!("{}_verifier.sp1", chain));
+        
+        // For development, create empty verifier files if they don't exist
+        if !verifier_path.exists() {
+            fs::write(&verifier_path, vec![]).expect("Failed to create verifier file");
+        }
+    }
 
-    // Print cargo directives
-    println!("cargo:rustc-env=RISC0_ELF_DIR={}", target_dir.display());
+    // In the future, add actual circuit compilation logic here
+    println!("cargo:warning=Using development placeholder circuits");
 } 
