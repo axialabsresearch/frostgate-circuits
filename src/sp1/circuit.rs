@@ -3,9 +3,7 @@
 
 //! Default circuit implementations for SP1
 
-// use sp1_core::utils::hash_bytes;
-use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues};
-// use sp1_core::SP1Verifier;
+use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues, CpuProver, SP1ProvingKey};
 use crate::error::ZkError;
 use crate::sp1::types::Sp1Circuit;
 
@@ -42,34 +40,34 @@ impl MessageVerifyCircuit {
 }
 
 impl Sp1Circuit for MessageVerifyCircuit {
-    fn prove(&self, prover: &ProverClient) -> Vec<u8> {
+    fn prove(&self, prover: &CpuProver) -> Vec<u8> {
         // Create stdin and write message
         let mut stdin = SP1Stdin::new();
-        stdin.write(&self.message);
+        stdin.write_slice(&self.message);
         
-        // Get program bytes
+        // Get program bytes and load proving key
         let program = self.get_program_bytes();
-        
-        // Setup the program
-        let (pk, _vk) = prover.setup(&program);
+        let proving_key = SP1ProvingKey::new(&program)
+            .expect("Failed to load proving key");
         
         // Generate the proof
-        let proof = prover.prove(&pk, stdin)
+        let proof = prover.prove(&proving_key, &stdin)
             .expect("Failed to generate proof");
             
         // Return the proof bytes
-        proof.to_bytes()
+        proof.bytes()
     }
     
-    fn verify(&self, verifier: &ProverClient, proof: &[u8]) -> bool {
-        // TODO: Implement proper verification using SP1Verifier
-        // For now, verify that the proof contains our expected hash
-        if proof.len() < 32 {
-            return false;
-        }
+    fn verify(&self, verifier: &CpuProver, proof: &[u8]) -> bool {
+        // Parse the proof
+        let proof = SP1ProofWithPublicValues::load(proof)
+            .expect("Failed to parse proof");
+            
+        // Get program bytes
+        let program = self.get_program_bytes();
         
-        // The first 32 bytes should be our expected hash
-        proof[..32] == self.expected_hash
+        // Verify the proof
+        verifier.verify(&program, &proof).is_ok()
     }
     
     fn program(&self) -> Vec<u8> {

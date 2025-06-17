@@ -7,63 +7,26 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues};
 use crate::error::ZkError;
-use crate::types::{ZkBackend, ZkProof, ZkProofMetadata, ZkOptions};
-use crate::cache::{Cache, CacheConfig, CacheStats};
-use super::types::{Sp1Circuit, Sp1Options, Sp1VerificationResult};
 
-mod backend;
-mod circuit;
-mod types;
-mod cache;
+//use crate::cache::{Cache, CacheConfig, CacheStats};
+//use super::types::{Sp1Circuit, Sp1Options, Sp1VerificationResult};
+//use super::backend::{Sp1Backend};
+
+pub mod backend;
+pub mod circuit;
+pub mod types;
+pub mod cache;
 
 #[cfg(test)]
 mod tests;
 
 pub use backend::Sp1Backend;
-pub use types::{Sp1Circuit, Sp1Options};
+pub use types::{Sp1Circuit, Sp1Options, Sp1VerificationResult};
 pub use cache::{CacheConfig, CacheStats};
 
-/// SP1 backend implementation
-pub struct Sp1Backend {
-    /// SP1 prover client
-    prover: ProverClient,
-    /// Circuit cache
-    cache: Cache<Vec<u8>, Vec<u8>>,
-    /// Proof cache
-    proof_cache: Cache<(Vec<u8>, Vec<u8>), Vec<u8>>,
-    /// Configuration options
-    options: Sp1Options,
-}
 
-impl Sp1Backend {
-    /// Create a new SP1 backend with default options
-    pub fn new() -> Self {
-        Self::with_config(Sp1Options::default(), CacheConfig::default())
-    }
 
-    /// Create a new SP1 backend with custom options
-    pub fn with_config(options: Sp1Options, cache_config: CacheConfig) -> Self {
-        let prover = ProverClient::new();
-        Self {
-            prover,
-            cache: Cache::new(cache_config.clone()),
-            proof_cache: Cache::new(cache_config),
-            options,
-        }
-    }
-
-    /// Get cache statistics
-    pub fn cache_stats(&self) -> CacheStats {
-        self.cache.stats()
-    }
-
-    /// Get proof cache statistics
-    pub fn proof_cache_stats(&self) -> CacheStats {
-        self.proof_cache.stats()
-    }
-}
-
-#[async_trait::async_trait]
+/* #[async_trait::async_trait]
 impl ZkBackend for Sp1Backend {
     async fn prove(
         &self,
@@ -122,7 +85,7 @@ impl ZkBackend for Sp1Backend {
         // Create circuit
         let circuit = self.create_circuit(program)?;
         
-        // Verify proof
+        // Verify proof 
         Ok(circuit.verify(&self.prover, proof))
     }
 
@@ -181,4 +144,4 @@ impl Sp1Circuit for MessageVerifyCircuit {
     fn program(&self) -> Vec<u8> {
         self.program.clone()
     }
-} 
+}  */

@@ -10,6 +10,6 @@ mod cache;
 #[cfg(test)]
 mod tests;
 
-pub use backend::Risc0Backend;
+pub use backend::{Risc0Backend, Risc0Config};
 pub use types::{Risc0Circuit, Risc0Options};
 pub use cache::{CacheConfig, CacheStats}; 

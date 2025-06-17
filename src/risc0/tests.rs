@@ -5,10 +5,12 @@ use frostgate_zkip::*;
 use sha2::{Sha256, Digest};
 use serde_json::json;
 use std::time::Duration;
+use std::default::Default;
+use super::circuit::MessageVerifyCircuit;
 
 #[tokio::test]
 async fn test_message_verification() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Create test message
     let message = b"Hello, World!";
@@ -16,22 +18,22 @@ async fn test_message_verification() {
     hasher.update(message);
     let expected_hash = hasher.finalize();
     
-    // Create program bytes (0x01 for message verification)
-    let mut program = vec![0x01];
+    // Create circuit
+    let mut program = vec![0x01]; // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/riscv/message_verify.elf"));
+    let circuit = MessageVerifyCircuit::new(&program).unwrap();
     
     // Generate proof
-    let (proof, metadata) = backend.prove(&program, message, None).await.unwrap();
+    let proof = backend.prove(&circuit).await.unwrap();
     
     // Verify proof
-    let result = backend.verify(&program, &proof, None).await.unwrap();
+    let result = backend.verify(&circuit, &proof).await.unwrap();
     assert!(result);
 }
 
 #[tokio::test]
 async fn test_transaction_verification() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Create test transaction
     let tx = b"{\"from\":\"0x123\",\"to\":\"0x456\",\"value\":\"100\"}";
@@ -39,22 +41,22 @@ async fn test_transaction_verification() {
     hasher.update(tx);
     let expected_hash = hasher.finalize();
     
-    // Create program bytes (0x02 for transaction verification)
-    let mut program = vec![0x02];
+    // Create circuit
+    let mut program = vec![0x01]; // Circuit type 1
     program.extend_from_slice(&expected_hash);
-    program.extend_from_slice(include_bytes!("../../../target/riscv/tx_verify.elf"));
+    let circuit = MessageVerifyCircuit::new(&program).unwrap();
     
     // Generate proof
-    let (proof, metadata) = backend.prove(&program, tx, None).await.unwrap();
+    let proof = backend.prove(&circuit).await.unwrap();
     
     // Verify proof
-    let result = backend.verify(&program, &proof, None).await.unwrap();
+    let result = backend.verify(&circuit, &proof).await.unwrap();
     assert!(result);
 }
 
 #[tokio::test]
 async fn test_batch_operations() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Create test messages
     let messages = vec![
@@ -97,7 +99,7 @@ async fn test_batch_operations() {
 
 #[tokio::test]
 async fn test_invalid_program() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Empty program
     let result = backend.prove(&[], b"test", None).await;
@@ -114,7 +116,7 @@ async fn test_invalid_program() {
 
 #[tokio::test]
 async fn test_resource_tracking() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Check initial state
     let usage = backend.resource_usage();
@@ -160,7 +162,7 @@ async fn test_resource_tracking() {
 
 #[tokio::test]
 async fn test_stats_tracking() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Check initial stats
     let stats = backend.stats();
@@ -194,7 +196,7 @@ async fn test_stats_tracking() {
 
 #[tokio::test]
 async fn test_block_verification() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Create test block header
     let block_header = json!({
@@ -232,7 +234,7 @@ async fn test_block_verification() {
 
 #[tokio::test]
 async fn test_invalid_block() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Test cases with invalid block headers
     let test_cases = vec![
@@ -296,7 +298,7 @@ async fn test_invalid_block() {
 
 #[tokio::test]
 async fn test_block_number_mismatch() {
-    let backend = Risc0Backend::new();
+    let backend = Risc0Backend::new(Risc0Config::default());
     
     // Create valid block header
     let block_header = json!({
@@ -332,7 +334,7 @@ async fn test_block_number_mismatch() {
 #[tokio::test]
 async fn test_circuit_caching() {
     let backend = Risc0Backend::with_config(
-        Risc0Options::default(),
+        Risc0Config::default(),
         CacheConfig {
             max_circuits: 10,
             max_proofs: 10,
@@ -373,7 +375,7 @@ async fn test_circuit_caching() {
 #[tokio::test]
 async fn test_proof_caching() {
     let backend = Risc0Backend::with_config(
-        Risc0Options::default(),
+        Risc0Config::default(),
         CacheConfig {
             max_circuits: 10,
             max_proofs: 10,
@@ -414,7 +416,7 @@ async fn test_proof_caching() {
 #[tokio::test]
 async fn test_cache_expiration() {
     let backend = Risc0Backend::with_config(
-        Risc0Options::default(),
+        Risc0Config::default(),
         CacheConfig {
             max_circuits: 10,
             max_proofs: 10,
@@ -458,7 +460,7 @@ async fn test_cache_expiration() {
 #[tokio::test]
 async fn test_cache_limits() {
     let backend = Risc0Backend::with_config(
-        Risc0Options::default(),
+        Risc0Config::default(),
         CacheConfig {
             max_circuits: 2,
             max_proofs: 2,
@@ -496,7 +498,7 @@ async fn test_cache_limits() {
 #[tokio::test]
 async fn test_cache_clear() {
     let backend = Risc0Backend::with_config(
-        Risc0Options::default(),
+        Risc0Config::default(),
         CacheConfig {
             max_circuits: 10,
             max_proofs: 10,

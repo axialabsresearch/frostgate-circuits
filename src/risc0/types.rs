@@ -34,4 +34,14 @@ pub struct Risc0Options {
     pub memory_limit: Option<usize>,
     /// Custom proving parameters
     pub custom_params: Option<Vec<u8>>,
+}
+
+impl Default for Risc0Options {
+    fn default() -> Self {
+        Self {
+            num_threads: Some(4),
+            memory_limit: Some(1024 * 1024 * 1024), // 1GB
+            custom_params: None,
+        }
+    }
 } 

@@ -67,6 +67,7 @@ impl Default for CacheConfig {
 }
 
 /// Circuit and proof cache
+#[derive(Debug)]
 pub struct CircuitCache {
     /// Cached compiled circuits
     circuits: RwLock<LruCache<[u8; 32], CircuitCacheEntry>>,
@@ -165,15 +166,23 @@ impl CircuitCache {
         
         // Clear expired circuits
         let mut circuits = self.circuits.write();
-        circuits.retain(|_, entry| {
-            entry.last_access.elapsed().unwrap() < self.config.max_age
-        });
+        let expired: Vec<_> = circuits.iter()
+            .filter(|(_, entry)| entry.last_access.elapsed().unwrap() >= self.config.max_age)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in expired {
+            circuits.pop(&k);
+        }
 
         // Clear expired proofs
         let mut proofs = self.proofs.write();
-        proofs.retain(|_, entry| {
-            entry.last_access.elapsed().unwrap() < self.config.max_age
-        });
+        let expired: Vec<_> = proofs.iter()
+            .filter(|(_, entry)| entry.last_access.elapsed().unwrap() >= self.config.max_age)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in expired {
+            proofs.pop(&k);
+        }
     }
 
     /// Clear all cache entries

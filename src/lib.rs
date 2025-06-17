@@ -19,9 +19,7 @@ pub use frostgate_zkip::{
 
 // Re-export backend implementations
 pub use sp1::Sp1Backend;
-pub use risc0::Risc0Backend;
-
-pub use error::ZkError;
+pub use risc0::{Risc0Backend, Risc0Config};
 
 #[cfg(test)]
 mod tests {
@@ -29,14 +27,14 @@ mod tests {
     use frostgate_zkip::*;
     
     #[test]
-    fn test_sp1_circuit() {
+    fn test_sp1_circuit() { 
         let backend = Sp1Backend::new();
-        // Add tests here
+        // Extra tests 
     }
 
     #[test]
     fn test_risc0_circuit() {
-        let backend = Risc0Backend::new();
-        // Add tests here
+        let backend = Risc0Backend::new(Risc0Config::default());
+        // Extra tests
     }
 }

@@ -52,9 +52,7 @@ impl MessageVerifyCircuit {
 
 impl Risc0Circuit for MessageVerifyCircuit {
     fn elf(&self) -> &[u8] {
-        // TODO: Provide the correct ELF file path or bytes
-        // include_bytes!("../../risc0/elf/message_verify.elf")
-        &[]
+        include_bytes!("../../../target/riscv/message_verify.elf")
     }
 
     fn public_inputs(&self) -> Vec<u32> {
@@ -67,8 +65,7 @@ impl Risc0Circuit for MessageVerifyCircuit {
 
     fn verify_receipt(&self, receipt: &Receipt) -> bool {
         // Verify that the receipt contains the expected hash
-        let journal = receipt.journal.as_ref().unwrap();
-        let journal_bytes = journal.decode().unwrap_or_default();
+        let journal_bytes: Vec<u8> = receipt.journal.decode().unwrap_or_default();
         let computed_hash = Digest::try_from(&journal_bytes[..32])
             .unwrap_or_default();
         computed_hash == self.expected_hash
@@ -116,8 +113,7 @@ impl Risc0Circuit for TxVerifyCircuit {
     fn verify_receipt(&self, receipt: &Receipt) -> bool {
         // Check that the journal contains our expected hash
         // and any additional transaction verification data
-        let journal = receipt.journal.as_ref().unwrap();
-        let journal_bytes = journal.decode().unwrap_or_default();
+        let journal_bytes: Vec<u8> = receipt.journal.decode().unwrap_or_default();
         
         if journal_bytes.len() < 64 {
             return false;
@@ -184,8 +180,7 @@ impl Risc0Circuit for BlockVerifyCircuit {
     
     fn verify_receipt(&self, receipt: &Receipt) -> bool {
         // Check that the journal contains our expected hash and block data
-        let journal = receipt.journal.as_ref().unwrap();
-        let journal_bytes = journal.decode().unwrap_or_default();
+        let journal_bytes: Vec<u8> = receipt.journal.decode().unwrap_or_default();
         
         if journal_bytes.len() < 56 { // 32 + 8 + 8 + 8
             return false;

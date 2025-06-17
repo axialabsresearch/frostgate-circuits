@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
-use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues};
+use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues, CpuProver};
 use tokio::sync::RwLock;
 use rayon::prelude::*;
 use frostgate_zkip::{
@@ -19,18 +19,19 @@ use super::circuit::MessageVerifyCircuit;
 use super::cache::{CircuitCache, CacheConfig, CacheStats};
 
 /// SP1 backend implementation
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Sp1Backend {
     /// Backend statistics
-    stats: Arc<RwLock<ZkStats>>,
+    pub stats: Arc<RwLock<ZkStats>>,
     /// Current resource usage
-    resources: Arc<RwLock<ResourceUsage>>,
+    pub resources: Arc<RwLock<ResourceUsage>>,
     /// SP1-specific options
-    options: Sp1Options,
+    pub options: Sp1Options,
     /// Circuit and proof cache
-    cache: Arc<CircuitCache>,
+    pub cache: Arc<CircuitCache>,
     /// SP1 prover client
-    client: ProverClient,
+    #[allow(dead_code)]
+    client: CpuProver,
 }
 
 impl Sp1Backend {
@@ -51,7 +52,7 @@ impl Sp1Backend {
                 custom_params: None,
             },
             cache: Arc::new(CircuitCache::new(CacheConfig::default())),
-            client: ProverClient::new(),
+            client: CpuProver::new(),
         }
     }
 
@@ -68,7 +69,7 @@ impl Sp1Backend {
             })),
             options,
             cache: Arc::new(CircuitCache::new(cache_config)),
-            client: ProverClient::new(),
+            client: CpuProver::new(),
         }
     }
 
@@ -93,7 +94,7 @@ impl Sp1Backend {
         let mut stats = self.stats.write().await;
         stats.total_verifications += 1;
         if !success {
-            stats.total_verification_failures += 1;
+            stats.total_failures += 1;
         }
         
         // Update average verification time
@@ -105,21 +106,22 @@ impl Sp1Backend {
     }
 
     /// Create a circuit from program and input
-    fn create_circuit(&self, program: &[u8], input: &[u8]) -> Result<MessageVerifyCircuit, ZkError> {
+    fn create_circuit(&self, program: &[u8], input: &[u8]) -> Result<MessageVerifyCircuit, frostgate_zkip::ZkError> {
         // For now, we only support message verification circuits
         if program.is_empty() || program[0] != 0x01 {
-            return Err(ZkError::Program("Unsupported circuit type".into()));
+            return Err(frostgate_zkip::ZkError::Program("Unsupported circuit type".into()));
         }
         
         // Extract expected hash from program
         if program.len() < 33 {
-            return Err(ZkError::Program("Invalid program format".into()));
+            return Err(frostgate_zkip::ZkError::Program("Invalid program format".into()));
         }
-        let expected_hash = program[1..33].try_into()
-            .map_err(|_| ZkError::Program("Invalid hash format".into()))?;
+        let expected_hash: [u8; 32] = program[1..33].try_into()
+            .map_err(|_| frostgate_zkip::ZkError::Program("Invalid hash format".into()))?;
         
         // Create circuit
         MessageVerifyCircuit::new(input.to_vec(), expected_hash)
+            .map_err(|e| frostgate_zkip::ZkError::Program(e.to_string()))
     }
 }
 
@@ -154,17 +156,14 @@ impl ZkBackend for Sp1Backend {
         
         // Create stdin and write input
         let mut stdin = SP1Stdin::new();
-        stdin.write(input);
-        
-        // Setup the program
-        let (pk, _vk) = self.client.setup(program);
+        stdin.write_slice(input);
         
         // Generate proof
-        let proof = self.client.prove(&pk, stdin)
-            .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
+        let proof = self.client.prove(program, &stdin)
+            .map_err(|e| ZkError::ProofGeneration(format!("Proof generation failed: {}", e)))?;
         
         // Serialize proof
-        let proof_bytes = proof.to_bytes();
+        let proof_bytes = proof.bytes();
         
         // Create metadata
         let duration = start.elapsed().unwrap_or_default();
@@ -201,12 +200,13 @@ impl ZkBackend for Sp1Backend {
         // Create circuit
         let circuit = self.create_circuit(program, &[])?;
         
-        // Setup the program
-        let (_pk, vk) = self.client.setup(program);
+        // Parse proof
+        let proof = SP1ProofWithPublicValues::load(proof)
+            .map_err(|e| ZkError::VerificationFailed(format!("Failed to parse proof: {}", e)))?;
         
         // Verify the proof
-        let result = self.client.verify(proof, &vk)
-            .map_err(|e| ZkError::Verification(format!("Proof verification failed: {}", e)))?;
+        let result = self.client.verify(program, &proof)
+            .map_err(|e| ZkError::VerificationFailed(format!("Proof verification failed: {}", e)))?;
         
         // Update stats
         self.update_verification_stats(start.elapsed().unwrap_or_default(), result).await;
@@ -214,14 +214,20 @@ impl ZkBackend for Sp1Backend {
         Ok(result)
     }
 
+    fn resource_usage(&self) -> ResourceUsage {
+        futures::executor::block_on(async {
+            self.resources.read().await.clone()
+        })
+    }
+
     async fn health_check(&self) -> HealthStatus {
         let resources = self.resources.read().await;
         let stats = self.stats.read().await;
         
-        HealthStatus {
-            is_healthy: resources.active_tasks < resources.max_concurrent,
-            resource_usage: resources.clone(),
-            stats: stats.clone(),
+        if resources.active_tasks < resources.max_concurrent {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded("High resource usage".into())
         }
     }
 }
@@ -256,15 +262,12 @@ impl ZkBackendExt for Sp1Backend {
                 let mut stdin = SP1Stdin::new();
                 stdin.write(input);
                 
-                // Setup the program
-                let (pk, _vk) = self.client.setup(program);
-                
                 // Generate proof
-                let proof = self.client.prove(&pk, stdin)
+                let proof = self.client.prove(program, &stdin)
                     .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
                 
                 // Serialize proof
-                let proof_bytes = proof.to_bytes();
+                let proof_bytes = proof.bytes();
                 
                 let duration = proof_start.elapsed().unwrap_or_default();
                 Ok((proof_bytes, ProofMetadata {
@@ -313,11 +316,8 @@ impl ZkBackendExt for Sp1Backend {
         // Verify proofs in parallel
         let results: Vec<ZkResult<bool>> = thread_pool.install(|| {
             verifications.par_iter().map(|(program, proof)| {
-                // Setup the program
-                let (_pk, vk) = self.client.setup(program);
-                
                 // Verify the proof
-                self.client.verify(proof, &vk)
+                self.client.verify(program, proof)
                     .map_err(|e| ZkError::Verification(format!("Proof verification failed: {}", e)))
             }).collect()
         });

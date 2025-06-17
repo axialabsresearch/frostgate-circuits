@@ -95,6 +95,11 @@ impl Risc0Backend {
     /// Create a new RISC0 backend with custom configuration
     pub fn with_config(options: Risc0Options, cache_config: CacheConfig) -> Self {
         Self {
+            config: Risc0Config {
+                max_threads: options.num_threads.unwrap_or(4),
+                memory_limit: options.memory_limit.unwrap_or(1024 * 1024 * 1024),
+                enable_cache: true,
+            },
             stats: RwLock::new(ZkStats::default()),
             resources: Arc::new(RwLock::new(ResourceUsage {
                 cpu_usage: 0.0,
@@ -111,64 +116,62 @@ impl Risc0Backend {
     /// Update statistics after a proving operation
     async fn update_proving_stats(&self, duration: Duration, success: bool) {
         let mut stats = self.stats.write();
-        stats.proofs_generated += 1;
+        stats.total_proofs += 1;
         if !success {
-            stats.proofs_verified += 1;
+            stats.total_failures += 1;
         }
         
-        // Update total proving time
-        stats.total_proving_time += duration;
+        // Update average proving time
+        let total_proofs: u32 = stats.total_proofs.try_into().unwrap();
+        let prev_proofs: u32 = (stats.total_proofs - 1).try_into().unwrap();
+        stats.avg_proving_time = (stats.avg_proving_time * prev_proofs + duration) / total_proofs;
     }
 
     /// Update statistics after a verification operation
     async fn update_verification_stats(&self, duration: Duration, success: bool) {
         let mut stats = self.stats.write();
-        stats.proofs_verified += 1;
+        stats.total_verifications += 1;
         if !success {
-            stats.proofs_verified += 1;
+            stats.total_failures += 1;
         }
         
-        // Update total verification time
-        stats.total_verification_time += duration;
+        // Update average verification time
+        let total_verifications: u32 = stats.total_verifications.try_into().unwrap();
+        let prev_verifications: u32 = (stats.total_verifications - 1).try_into().unwrap();
+        stats.avg_verification_time = (stats.avg_verification_time * prev_verifications + duration) / total_verifications;
     }
 
     /// Create a circuit from program bytes and input
     fn create_circuit(&self, program: &[u8], input: &[u8]) -> ZkResult<Box<dyn Risc0Circuit>> {
         // Check cache first
         if let Some(entry) = self.cache.get_circuit(program) {
-            let circuit = match program[0] {
+            let circuit: Box<dyn Risc0Circuit> = match program[0] {
                 0x01 => {
                     let mut expected_hash = [0u8; 32];
                     expected_hash.copy_from_slice(&program[1..33]);
-                    Box::new(MessageVerifyCircuit::new(
-                        input.to_vec(),
-                        expected_hash,
-                    ))
+                    Box::new(MessageVerifyCircuit::new(input).map_err(|e| ZkError::Backend(e.to_string()))?)
                 }
-                _ => return Err(ZkError::InvalidProgram("Unknown circuit type".into())),
+                _ => return Err(ZkError::Backend("Unknown circuit type".into())),
             };
             return Ok(circuit);
         }
 
         // Not in cache, create new circuit
-        let start = Instant::now();
-        let circuit = match program[0] {
+        let start = SystemTime::now();
+        let circuit: Box<dyn Risc0Circuit> = match program[0] {
             0x01 => {
                 let mut expected_hash = [0u8; 32];
                 if program.len() < 33 {
-                    return Err(ZkError::InvalidProgram("Program too short for message verification".into()));
+                    return Err(ZkError::Backend("Program too short for message verification".into()));
                 }
                 expected_hash.copy_from_slice(&program[1..33]);
-                Box::new(MessageVerifyCircuit::new(
-                    input.to_vec(),
-                    expected_hash,
-                ))
+                Box::new(MessageVerifyCircuit::new(input).map_err(|e| ZkError::Backend(e.to_string()))?)
             }
-            _ => return Err(ZkError::InvalidProgram("Unknown circuit type".into())),
+            _ => return Err(ZkError::Backend("Unknown circuit type".into())),
         };
 
         // Store in cache
-        let compile_time = start.elapsed().unwrap();
+        let compile_time = start.elapsed().unwrap_or_default();
         self.cache.store_circuit(program, circuit.elf().to_vec(), compile_time);
 
         Ok(circuit)
@@ -180,7 +183,7 @@ impl Risc0Backend {
         
         // Add public inputs
         for input in circuit.public_inputs() {
-            builder.add_input(input);
+            builder.write_slice(&input.to_le_bytes());
         }
         
         // Add private inputs
@@ -194,25 +197,26 @@ impl Risc0Backend {
         let start = SystemTime::now();
         
         // Create prover options
-        let opts = ProverOpts::default()
-            .with_max_threads(self.config.max_threads)
-            .with_memory_limit(self.config.memory_limit);
+        let opts = ProverOpts::default();
 
         // Create prover
-        let prover = Prover::new(opts)
+        let prover = Prover::new(circuit.elf().to_vec())
             .map_err(|e| CustomZkError::Backend(format!("Failed to create prover: {}", e)))?;
 
         // Create executor environment
         let env = self.create_env(circuit);
 
         // Generate proof
-        let receipt = prover.prove(env, circuit.elf())
+        let receipt = prover.prove(env)
             .map_err(|e| CustomZkError::ProofGeneration(format!("Failed to generate proof: {}", e)))?;
 
         // Update statistics
+        let duration = start.elapsed().unwrap_or_default();
         let mut stats = self.stats.write();
-        stats.proofs_generated += 1;
-        stats.total_proving_time += start.elapsed().unwrap_or_default();
+        stats.total_proofs += 1;
+        let total_proofs: u32 = stats.total_proofs.try_into().unwrap();
+        let prev_proofs: u32 = (stats.total_proofs - 1).try_into().unwrap();
+        stats.avg_proving_time = (stats.avg_proving_time * prev_proofs + duration) / total_proofs;
 
         // Return proof bytes
         Ok(receipt.to_bytes())
@@ -230,9 +234,15 @@ impl Risc0Backend {
         let is_valid = circuit.verify_receipt(&receipt);
 
         // Update statistics
+        let duration = start.elapsed().unwrap_or_default();
         let mut stats = self.stats.write();
-        stats.proofs_verified += 1;
-        stats.total_verification_time += start.elapsed().unwrap_or_default();
+        stats.total_verifications += 1;
+        if !is_valid {
+            stats.total_failures += 1;
+        }
+        let total_verifications: u32 = stats.total_verifications.try_into().unwrap();
+        let prev_verifications: u32 = (stats.total_verifications - 1).try_into().unwrap();
+        stats.avg_verification_time = (stats.avg_verification_time * prev_verifications + duration) / total_verifications;
 
         Ok(is_valid)
     }
@@ -273,7 +283,7 @@ impl ZkBackend for Risc0Backend {
         input: &[u8],
         config: Option<&ZkConfig>,
     ) -> ZkResult<(Vec<u8>, ProofMetadata)> {
-        let start = Instant::now();
+        let start = SystemTime::now();
         
         // Check proof cache first
         if let Some(entry) = self.cache.get_proof(program, input) {
@@ -281,7 +291,7 @@ impl ZkBackend for Risc0Backend {
                 generation_time: entry.generation_time,
                 proof_size: entry.proof.len(),
                 program_hash: hex::encode(&entry.program_hash),
-                timestamp: start,
+                timestamp: SystemTime::now(),
             }));
         }
         
@@ -295,24 +305,23 @@ impl ZkBackend for Risc0Backend {
         let circuit = self.create_circuit(program, input)?;
         
         // Create prover
-        let prover = Prover::new(circuit.elf(), ProverOpts::default())
-            .map_err(|e| ZkError::Prover(format!("Failed to create prover: {}", e)))?;
+        let prover = Prover::new(circuit.elf().to_vec())
+            .map_err(|e| ZkError::Backend(format!("Failed to create prover: {}", e)))?;
         
         // Create environment
         let env = self.create_env(circuit.as_ref());
         
         // Generate proof
         let receipt = prover.prove(env)
-            .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
+            .map_err(|e| ZkError::Backend(format!("Proof generation failed: {}", e)))?;
         
         // Verify circuit-specific conditions
-        if !circuit.verify(&receipt) {
-            return Err(ZkError::Verification("Circuit verification failed".into()));
+        if !circuit.verify_receipt(&receipt) {
+            return Err(ZkError::Backend("Circuit verification failed".into()));
         }
         
         // Serialize proof
-        let proof_bytes = bincode::serialize(&receipt)
-            .map_err(|e| ZkError::Serialization(format!("Failed to serialize proof: {}", e)))?;
+        let proof_bytes = receipt.to_bytes();
         
         // Create metadata
         let duration = start.elapsed().unwrap_or_default();
@@ -320,7 +329,7 @@ impl ZkBackend for Risc0Backend {
             generation_time: duration,
             proof_size: proof_bytes.len(),
             program_hash: hex::encode(circuit.elf()),
-            timestamp: start,
+            timestamp: SystemTime::now(),
         };
 
         // Store in cache
@@ -344,7 +353,7 @@ impl ZkBackend for Risc0Backend {
         proof: &[u8],
         config: Option<&ZkConfig>,
     ) -> ZkResult<bool> {
-        let start = Instant::now();
+        let start = SystemTime::now();
         
         // Update resource tracking
         {
@@ -355,12 +364,12 @@ impl ZkBackend for Risc0Backend {
         // Create circuit
         let circuit = self.create_circuit(program, &[])?;
         
-        // Deserialize proof
-        let receipt: Receipt = bincode::deserialize(proof)
-            .map_err(|e| ZkError::Serialization(format!("Failed to deserialize proof: {}", e)))?;
+        // Parse receipt
+        let receipt = Receipt::from_bytes(proof)
+            .map_err(|e| ZkError::Backend(format!("Failed to parse receipt: {}", e)))?;
         
         // Verify proof
-        let result = circuit.verify(&receipt);
+        let result = circuit.verify_receipt(&receipt);
         
         // Update stats
         self.update_verification_stats(start.elapsed().unwrap_or_default(), result).await;
@@ -399,11 +408,11 @@ impl ZkBackendExt for Risc0Backend {
         programs: &[(&[u8], &[u8])],
         config: Option<&ZkConfig>,
     ) -> ZkResult<Vec<(Vec<u8>, ProofMetadata)>> {
-        let start = Instant::now();
+        let start = SystemTime::now();
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.options.num_threads.unwrap_or(4))
             .build()
-            .map_err(|e| ZkError::Prover(format!("Failed to create thread pool: {}", e)))?;
+            .map_err(|e| ZkError::Backend(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -416,43 +425,48 @@ impl ZkBackendExt for Risc0Backend {
         let results: Vec<ZkResult<(Vec<u8>, ProofMetadata)>> = thread_pool.install(|| {
             programs.par_iter().map(|(program, input)| {
                 let circuit = self.create_circuit(program, input)?;
-                let proof_start = Instant::now();
+                let proof_start = SystemTime::now();
                 
                 // Create prover
-                let prover = Prover::new(circuit.elf(), ProverOpts::default())
-                    .map_err(|e| ZkError::Prover(format!("Failed to create prover: {}", e)))?;
+                let prover = Prover::new(circuit.elf().to_vec())
+                    .map_err(|e| ZkError::Backend(format!("Failed to create prover: {}", e)))?;
                 
                 // Create environment
                 let env = self.create_env(circuit.as_ref());
                 
                 // Generate proof
                 let receipt = prover.prove(env)
-                    .map_err(|e| ZkError::Prover(format!("Proof generation failed: {}", e)))?;
+                    .map_err(|e| ZkError::Backend(format!("Proof generation failed: {}", e)))?;
                 
                 // Verify circuit-specific conditions
-                if !circuit.verify(&receipt) {
-                    return Err(ZkError::Verification("Circuit verification failed".into()));
+                if !circuit.verify_receipt(&receipt) {
+                    return Err(ZkError::Backend("Circuit verification failed".into()));
                 }
                 
                 // Serialize proof
-                let proof_bytes = bincode::serialize(&receipt)
-                    .map_err(|e| ZkError::Serialization(format!("Failed to serialize proof: {}", e)))?;
+                let proof_bytes = receipt.to_bytes();
                 
                 let duration = proof_start.elapsed().unwrap_or_default();
                 Ok((proof_bytes, ProofMetadata {
                     generation_time: duration,
                     proof_size: proof_bytes.len(),
                     program_hash: hex::encode(circuit.elf()),
-                    timestamp: proof_start,
+                    timestamp: SystemTime::now(),
                 }))
             }).collect()
         });
 
         // Update stats
-        self.update_proving_stats(
-            start.elapsed().unwrap_or_default(),
-            results.iter().all(|r| r.is_ok()),
-        ).await;
+        let duration = start.elapsed().unwrap_or_default();
+        let success = results.iter().all(|r| r.is_ok());
+        let mut stats = self.stats.write();
+        stats.total_proofs += programs.len();
+        if !success {
+            stats.total_failures += 1;
+        }
+        let total_proofs: u32 = stats.total_proofs.try_into().unwrap();
+        let prev_proofs: u32 = (stats.total_proofs - programs.len()).try_into().unwrap();
+        stats.avg_proving_time = (stats.avg_proving_time * prev_proofs + duration) / total_proofs;
 
         // Update resource tracking
         {
@@ -470,11 +484,11 @@ impl ZkBackendExt for Risc0Backend {
         verifications: &[(&[u8], &[u8])],
         config: Option<&ZkConfig>,
     ) -> ZkResult<Vec<bool>> {
-        let start = Instant::now();
+        let start = SystemTime::now();
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.options.num_threads.unwrap_or(4))
             .build()
-            .map_err(|e| ZkError::Prover(format!("Failed to create thread pool: {}", e)))?;
+            .map_err(|e| ZkError::Backend(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -488,19 +502,25 @@ impl ZkBackendExt for Risc0Backend {
             verifications.par_iter().map(|(program, proof)| {
                 let circuit = self.create_circuit(program, &[])?;
                 
-                // Deserialize proof
-                let receipt: Receipt = bincode::deserialize(proof)
-                    .map_err(|e| ZkError::Serialization(format!("Failed to deserialize proof: {}", e)))?;
+                // Parse receipt
+                let receipt = Receipt::from_bytes(proof)
+                    .map_err(|e| ZkError::Backend(format!("Failed to parse receipt: {}", e)))?;
                 
-                Ok(circuit.verify(&receipt))
+                Ok(circuit.verify_receipt(&receipt))
             }).collect()
         });
 
         // Update stats
-        self.update_verification_stats(
-            start.elapsed().unwrap_or_default(),
-            results.iter().all(|r| r.is_ok()),
-        ).await;
+        let duration = start.elapsed().unwrap_or_default();
+        let success = results.iter().all(|r| r.is_ok());
+        let mut stats = self.stats.write();
+        stats.total_verifications += verifications.len();
+        if !success {
+            stats.total_failures += 1;
+        }
+        let total_verifications: u32 = stats.total_verifications.try_into().unwrap();
+        let prev_verifications: u32 = (stats.total_verifications - verifications.len()).try_into().unwrap();
+        stats.avg_verification_time = (stats.avg_verification_time * prev_verifications + duration) / total_verifications;
 
         // Update resource tracking
         {
@@ -511,5 +531,19 @@ impl ZkBackendExt for Risc0Backend {
 
         // Collect results
         results.into_iter().collect()
+    }
+
+    async fn clear_cache(&mut self) -> ZkResult<()> {
+        // No cache to clear in this implementation
+        Ok(())
+    }
+
+    fn capabilities(&self) -> Vec<String> {
+        vec![
+            "risc0".to_string(),
+            "message_verify".to_string(),
+            "tx_verify".to_string(),
+            "block_verify".to_string(),
+        ]
     }
 } 
