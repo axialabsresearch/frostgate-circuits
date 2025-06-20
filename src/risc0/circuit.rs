@@ -1,5 +1,12 @@
+#![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_assignments)]
+#![allow(unused_must_use)]
+#![allow(unused_braces)]
+#![allow(unused_parens)]
+#![allow(unused_macros)]
 
 use std::error::Error;
 use serde::{Serialize, Deserialize};

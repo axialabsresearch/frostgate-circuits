@@ -166,23 +166,26 @@ impl Sp1Backend {
     }
 
     async fn verify_internal(&self, program: &[u8], proof: &[u8]) -> ZkResult<bool> {
-        // Create proving key
-        let proving_key = SP1ProvingKey::from(program)
-            .map_err(|e| ZkError::Backend(format!("Failed to create proving key: {}", e)))?;
+        // Create proving key and verifying key
+        let (proving_key, verifying_key) = self.client.inner().setup(program);
         
-        // Create verifying key
-        let verifying_key = SP1VerifyingKey::from(&proving_key);
+        // Parse proof - create a temporary file since load requires a path
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("proof.tmp");
+        std::fs::write(&temp_path, proof)
+            .map_err(|e| ZkError::Backend(format!("Failed to write proof to temp file: {}", e)))?;
         
-        // Parse proof
-        let proof_str = hex::encode(proof);
-        let proof = SP1ProofWithPublicValues::from_bytes(proof)
+        let proof = SP1ProofWithPublicValues::load(&temp_path)
             .map_err(|e| ZkError::Backend(format!("Failed to parse proof: {}", e)))?;
         
-        // Verify proof
-        let result = self.client.inner().verify(&verifying_key, &proof)
-            .map_err(|e| ZkError::Backend(format!("Proof verification failed: {}", e)))?;
+        // Clean up temp file
+        let _ = std::fs::remove_file(temp_path);
         
-        Ok(result)
+        // Verify proof
+        match self.client.inner().verify(&proof, &verifying_key) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false)
+        }
     }
 }
 
@@ -308,21 +311,21 @@ impl ZkBackendExt for Sp1Backend {
                 let mut stdin = SP1Stdin::new();
                 stdin.write(input);
                 
-                // Fix proof generation
-                let proving_key = SP1ProvingKey::from(program)
-                    .map_err(|e| ZkError::Backend(format!("Failed to create proving key: {}", e)))?;
+                // Create proving key and verifying key
+                let (proving_key, verifying_key) = self.client.inner().setup(program);
 
                 let proof = self.client.inner().prove(&proving_key, &stdin)
                     .run()
                     .map_err(|e| ZkError::Backend(format!("Proof generation failed: {}", e)))?;
                 
-                // Serialize proof
-                let proof_bytes = proof.bytes();
+                // Get proof bytes and their size
+                let proof_bytes = proof.bytes().to_vec();
+                let proof_size = proof_bytes.len();
                 
                 let duration = proof_start.elapsed().unwrap_or_default();
                 Ok((proof_bytes, ProofMetadata {
                     generation_time: duration,
-                    proof_size: proof_bytes.len(),
+                    proof_size,
                     program_hash: hex::encode(program),
                     timestamp: proof_start,
                 }))
@@ -358,19 +361,25 @@ impl ZkBackendExt for Sp1Backend {
         // Verify proofs in parallel
         let results: Vec<ZkResult<bool>> = thread_pool.install(|| {
             verifications.par_iter().map(|(program, proof)| {
-                let proving_key = SP1ProvingKey::from(program)
-                    .map_err(|e| ZkError::Backend(format!("Failed to create proving key: {}", e)))?;
+                let (proving_key, verifying_key) = self.client.inner().setup(program);
                 
-                let verifying_key = SP1VerifyingKey::from(&proving_key);
+                // Parse proof - create a temporary file since load requires a path
+                let temp_dir = std::env::temp_dir();
+                let temp_path = temp_dir.join("proof.tmp");
+                std::fs::write(&temp_path, proof)
+                    .map_err(|e| ZkError::Backend(format!("Failed to write proof to temp file: {}", e)))?;
                 
-                let proof_str = hex::encode(proof);
-                let proof = SP1ProofWithPublicValues::from_bytes(proof)
+                let proof = SP1ProofWithPublicValues::load(&temp_path)
                     .map_err(|e| ZkError::Backend(format!("Failed to parse proof: {}", e)))?;
-
-                let result = self.client.inner().verify(&verifying_key, &proof)
-                    .map_err(|e| ZkError::Backend(format!("Proof verification failed: {}", e)))?;
-
-                Ok(result)
+                
+                // Clean up temp file
+                let _ = std::fs::remove_file(temp_path);
+                
+                // Verify proof
+                match self.client.inner().verify(&proof, &verifying_key) {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false)
+                }
             }).collect()
         });
 
