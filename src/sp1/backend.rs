@@ -56,7 +56,7 @@ pub struct Sp1Backend {
     pub cache: Arc<CircuitCache>,
     /// SP1 prover client
     #[allow(dead_code)]
-    client: DebugCpuProver,
+    pub client: DebugCpuProver,
 }
 
 impl Sp1Backend {
