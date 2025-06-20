@@ -3,9 +3,14 @@
 
 //! Default circuit implementations for SP1
 
-use sp1_sdk::{ProverClient, SP1Stdin, SP1ProofWithPublicValues, CpuProver, SP1ProvingKey};
+use sp1_sdk::{
+    ProverClient, SP1Stdin, SP1ProofWithPublicValues, CpuProver,
+    SP1ProvingKey, SP1VerifyingKey, Prover,
+};
+use serde::Deserialize;
 use crate::error::ZkError;
 use crate::sp1::types::Sp1Circuit;
+use std::path::Path;
 
 /// Basic message verification circuit
 pub struct MessageVerifyCircuit {
@@ -45,29 +50,35 @@ impl Sp1Circuit for MessageVerifyCircuit {
         let mut stdin = SP1Stdin::new();
         stdin.write_slice(&self.message);
         
-        // Get program bytes and load proving key
-        let program = self.get_program_bytes();
-        let proving_key = SP1ProvingKey::new(&program)
-            .expect("Failed to load proving key");
-        
-        // Generate the proof
-        let proof = prover.prove(&proving_key, &stdin)
-            .expect("Failed to generate proof");
-            
-        // Return the proof bytes
-        proof.bytes()
-    }
-    
-    fn verify(&self, verifier: &CpuProver, proof: &[u8]) -> bool {
-        // Parse the proof
-        let proof = SP1ProofWithPublicValues::load(proof)
-            .expect("Failed to parse proof");
-            
         // Get program bytes
         let program = self.get_program_bytes();
         
-        // Verify the proof
-        verifier.verify(&program, &proof).is_ok()
+        // Create proving key
+        let (proving_key, _) = prover.setup(&program);
+        
+        // Generate proof
+        let proof = prover.prove(&proving_key, &stdin)
+            .run()
+            .expect("Failed to generate proof");
+        
+        // Return proof bytes
+        proof.bytes().to_vec()
+    }
+    
+    fn verify(&self, verifier: &CpuProver, proof: &[u8]) -> bool {
+        // Get program bytes
+        let program = self.get_program_bytes();
+        
+        // Create proving key and verifying key
+        let (proving_key, verifying_key) = verifier.setup(&program);
+        
+        // Parse proof
+        let proof = verifier.prove(&proving_key, &SP1Stdin::new())
+            .run()
+            .expect("Failed to parse proof");
+        
+        // Verify proof
+        verifier.verify(&proof, &verifying_key).is_ok()
     }
     
     fn program(&self) -> Vec<u8> {

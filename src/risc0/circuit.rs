@@ -52,7 +52,7 @@ impl MessageVerifyCircuit {
 
 impl Risc0Circuit for MessageVerifyCircuit {
     fn elf(&self) -> &[u8] {
-        include_bytes!("../../../target/riscv/message_verify.elf")
+        include_bytes!("../../target/riscv/message_verify.elf")
     }
 
     fn public_inputs(&self) -> Vec<u32> {
@@ -75,11 +75,11 @@ impl Risc0Circuit for MessageVerifyCircuit {
 /// Transaction verification circuit
 pub struct TxVerifyCircuit {
     /// Transaction bytes
-    tx_bytes: Vec<u8>,
+    pub tx_bytes: Vec<u8>,
     /// Expected transaction hash
-    expected_hash: [u8; 32],
+    pub expected_hash: [u8; 32],
     /// Circuit ELF bytes
-    elf_bytes: Vec<u8>,
+    pub elf_bytes: Vec<u8>,
 }
 
 impl TxVerifyCircuit {

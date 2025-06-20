@@ -1,15 +1,10 @@
-//! RISC0 backend implementation for Frostgate
-//! 
-//! This module provides a ZkBackend implementation using the RISC0 proving system.
+//! RISC0 backend implementation
 
 mod backend;
 mod circuit;
-mod types;
 mod cache;
-
-#[cfg(test)]
-mod tests;
+mod types;
 
 pub use backend::{Risc0Backend, Risc0Config};
-pub use types::{Risc0Circuit, Risc0Options};
-pub use cache::{CacheConfig, CacheStats}; 
+pub use circuit::MessageVerifyCircuit;
+pub use types::{Risc0Circuit, Risc0Options}; 

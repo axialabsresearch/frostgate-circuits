@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![cfg(feature = "prove")]
 
 //! RISC0 backend implementation
 
@@ -13,12 +14,10 @@ use rayon::prelude::*;
 use futures::future::join_all;
 use serde::{Serialize, Deserialize};
 use risc0_zkvm::{
-    Prover, ProverOpts,
-    Receipt,
-    ExecutorEnv,
-    ExecutorEnvBuilder,
-    sha::Digest,
-    Journal,
+    ExecutorEnv, ExecutorEnvBuilder,
+    Receipt, ProverOpts,
+    sha::Digest, Journal,
+    default_prover,
 };
 use thiserror::Error;
 use async_trait::async_trait;
@@ -27,6 +26,8 @@ use frostgate_zkip::{
     ZkBackend, ZkBackendExt, ZkError, ZkResult,
     HealthStatus, ProofMetadata, ResourceUsage, ZkConfig, ZkStats,
 };
+use bincode::{serialize, deserialize};
+use futures::TryFutureExt;
 
 use super::types::{Risc0Circuit, Risc0Options};
 use super::circuit::MessageVerifyCircuit;
@@ -183,7 +184,7 @@ impl Risc0Backend {
         
         // Add public inputs
         for input in circuit.public_inputs() {
-            builder.write_slice(&input.to_le_bytes());
+            builder.write(&input);
         }
         
         // Add private inputs
@@ -192,23 +193,44 @@ impl Risc0Backend {
         builder.build().unwrap()
     }
 
+    async fn prove_internal(&self, circuit: &dyn Risc0Circuit) -> Result<Vec<u8>, CustomZkError> {
+        // Create environment
+        let env = self.create_env(circuit);
+        
+        // Create prover instance
+        let prover = default_prover();
+        let receipt = prover.prove_elf(env, &circuit.elf().to_vec())
+            .map_err(|e| CustomZkError::Backend(format!("Failed to generate proof: {}", e)))?;
+        
+        // Serialize receipt
+        serialize(&receipt)
+            .map_err(|e| CustomZkError::Backend(format!("Failed to serialize receipt: {}", e)))
+    }
+
+    async fn verify_internal(&self, circuit: &dyn Risc0Circuit, proof: &[u8]) -> Result<bool, CustomZkError> {
+        // Deserialize receipt
+        let receipt: Receipt = deserialize(proof)
+            .map_err(|e| CustomZkError::ProofVerification(format!("Failed to parse receipt: {}", e)))?;
+        
+        // Verify receipt
+        Ok(circuit.verify_receipt(&receipt))
+    }
+
     /// Generate a proof for a circuit
     pub async fn prove<C: Risc0Circuit>(&self, circuit: &C) -> Result<Vec<u8>, CustomZkError> {
         let start = SystemTime::now();
         
-        // Create prover options
-        let opts = ProverOpts::default();
-
-        // Create prover
-        let prover = Prover::new(circuit.elf().to_vec())
-            .map_err(|e| CustomZkError::Backend(format!("Failed to create prover: {}", e)))?;
-
-        // Create executor environment
+        // Create environment
         let env = self.create_env(circuit);
+        
+        // Create prover instance
+        let prover = default_prover();
+        let receipt = prover.prove_elf(env, &circuit.elf().to_vec())
+            .map_err(|e| CustomZkError::Backend(format!("Failed to generate proof: {}", e)))?;
 
-        // Generate proof
-        let receipt = prover.prove(env)
-            .map_err(|e| CustomZkError::ProofGeneration(format!("Failed to generate proof: {}", e)))?;
+        // Serialize receipt
+        let proof_bytes = serialize(&receipt)
+            .map_err(|e| CustomZkError::Backend(format!("Failed to serialize receipt: {}", e)))?;
 
         // Update statistics
         let duration = start.elapsed().unwrap_or_default();
@@ -218,16 +240,15 @@ impl Risc0Backend {
         let prev_proofs: u32 = (stats.total_proofs - 1).try_into().unwrap();
         stats.avg_proving_time = (stats.avg_proving_time * prev_proofs + duration) / total_proofs;
 
-        // Return proof bytes
-        Ok(receipt.to_bytes())
+        Ok(proof_bytes)
     }
 
     /// Verify a proof for a circuit
     pub async fn verify<C: Risc0Circuit>(&self, circuit: &C, proof: &[u8]) -> Result<bool, CustomZkError> {
         let start = SystemTime::now();
 
-        // Parse receipt
-        let receipt = Receipt::from_bytes(proof)
+        // Deserialize receipt
+        let receipt: Receipt = deserialize(proof)
             .map_err(|e| CustomZkError::ProofVerification(format!("Failed to parse receipt: {}", e)))?;
 
         // Verify receipt
@@ -287,41 +308,21 @@ impl ZkBackend for Risc0Backend {
         
         // Check proof cache first
         if let Some(entry) = self.cache.get_proof(program, input) {
-            return Ok((entry.proof, ProofMetadata {
+            let proof = entry.proof.clone();
+            return Ok((proof.clone(), ProofMetadata {
                 generation_time: entry.generation_time,
-                proof_size: entry.proof.len(),
+                proof_size: proof.len(),
                 program_hash: hex::encode(&entry.program_hash),
-                timestamp: SystemTime::now(),
+                timestamp: start,
             }));
         }
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks += 1;
-        }
-
         // Create circuit
         let circuit = self.create_circuit(program, input)?;
         
-        // Create prover
-        let prover = Prover::new(circuit.elf().to_vec())
-            .map_err(|e| ZkError::Backend(format!("Failed to create prover: {}", e)))?;
-        
-        // Create environment
-        let env = self.create_env(circuit.as_ref());
-        
         // Generate proof
-        let receipt = prover.prove(env)
-            .map_err(|e| ZkError::Backend(format!("Proof generation failed: {}", e)))?;
-        
-        // Verify circuit-specific conditions
-        if !circuit.verify_receipt(&receipt) {
-            return Err(ZkError::Backend("Circuit verification failed".into()));
-        }
-        
-        // Serialize proof
-        let proof_bytes = receipt.to_bytes();
+        let proof_bytes = self.prove_internal(circuit.as_ref()).await
+            .map_err(|e| ZkError::Backend(e.to_string()))?;
         
         // Create metadata
         let duration = start.elapsed().unwrap_or_default();
@@ -338,12 +339,6 @@ impl ZkBackend for Risc0Backend {
         // Update stats
         self.update_proving_stats(duration, true).await;
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks -= 1;
-        }
-
         Ok((proof_bytes, metadata))
     }
 
@@ -355,31 +350,16 @@ impl ZkBackend for Risc0Backend {
     ) -> ZkResult<bool> {
         let start = SystemTime::now();
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks += 1;
-        }
-
         // Create circuit
         let circuit = self.create_circuit(program, &[])?;
         
-        // Parse receipt
-        let receipt = Receipt::from_bytes(proof)
-            .map_err(|e| ZkError::Backend(format!("Failed to parse receipt: {}", e)))?;
-        
         // Verify proof
-        let result = circuit.verify_receipt(&receipt);
+        let result = self.verify_internal(circuit.as_ref(), proof).await
+            .map_err(|e| ZkError::Backend(e.to_string()))?;
         
         // Update stats
         self.update_verification_stats(start.elapsed().unwrap_or_default(), result).await;
         
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks -= 1;
-        }
-
         Ok(result)
     }
 
@@ -409,10 +389,6 @@ impl ZkBackendExt for Risc0Backend {
         config: Option<&ZkConfig>,
     ) -> ZkResult<Vec<(Vec<u8>, ProofMetadata)>> {
         let start = SystemTime::now();
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.options.num_threads.unwrap_or(4))
-            .build()
-            .map_err(|e| ZkError::Backend(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -421,61 +397,30 @@ impl ZkBackendExt for Risc0Backend {
             resources.queue_depth = programs.len();
         }
 
-        // Generate proofs in parallel
-        let results: Vec<ZkResult<(Vec<u8>, ProofMetadata)>> = thread_pool.install(|| {
-            programs.par_iter().map(|(program, input)| {
-                let circuit = self.create_circuit(program, input)?;
-                let proof_start = SystemTime::now();
-                
-                // Create prover
-                let prover = Prover::new(circuit.elf().to_vec())
-                    .map_err(|e| ZkError::Backend(format!("Failed to create prover: {}", e)))?;
-                
-                // Create environment
-                let env = self.create_env(circuit.as_ref());
-                
-                // Generate proof
-                let receipt = prover.prove(env)
-                    .map_err(|e| ZkError::Backend(format!("Proof generation failed: {}", e)))?;
-                
-                // Verify circuit-specific conditions
-                if !circuit.verify_receipt(&receipt) {
-                    return Err(ZkError::Backend("Circuit verification failed".into()));
-                }
-                
-                // Serialize proof
-                let proof_bytes = receipt.to_bytes();
-                
-                let duration = proof_start.elapsed().unwrap_or_default();
-                Ok((proof_bytes, ProofMetadata {
-                    generation_time: duration,
-                    proof_size: proof_bytes.len(),
-                    program_hash: hex::encode(circuit.elf()),
-                    timestamp: SystemTime::now(),
-                }))
-            }).collect()
-        });
+        // Create futures for all proofs
+        let futures: Vec<_> = programs.iter().map(|(program, input)| async {
+            let circuit = self.create_circuit(program, input)?;
+            let proof_start = SystemTime::now();
+            
+            // Generate proof
+            let proof_bytes = self.prove_internal(circuit.as_ref()).await.map_err(|e| 
+                frostgate_zkip::ZkError::Backend(e.to_string()))?;
+            
+            let duration = proof_start.elapsed().unwrap_or_default();
+            let size = proof_bytes.len();
+            Ok((proof_bytes, ProofMetadata {
+                generation_time: duration,
+                proof_size: size,
+                program_hash: hex::encode(circuit.elf()),
+                timestamp: SystemTime::now(),
+            }))
+        }).collect();
 
-        // Update stats
-        let duration = start.elapsed().unwrap_or_default();
-        let success = results.iter().all(|r| r.is_ok());
-        let mut stats = self.stats.write();
-        stats.total_proofs += programs.len();
-        if !success {
-            stats.total_failures += 1;
-        }
-        let total_proofs: u32 = stats.total_proofs.try_into().unwrap();
-        let prev_proofs: u32 = (stats.total_proofs - programs.len()).try_into().unwrap();
-        stats.avg_proving_time = (stats.avg_proving_time * prev_proofs + duration) / total_proofs;
+        // Execute all futures concurrently
+        let results = join_all(futures).await;
 
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks -= programs.len();
-            resources.queue_depth = 0;
-        }
-
-        // Collect results
+        // Update stats and return
+        self.update_proving_stats(start.elapsed().unwrap_or_default(), results.iter().all(|r| r.is_ok())).await;
         results.into_iter().collect()
     }
 
@@ -485,10 +430,6 @@ impl ZkBackendExt for Risc0Backend {
         config: Option<&ZkConfig>,
     ) -> ZkResult<Vec<bool>> {
         let start = SystemTime::now();
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.options.num_threads.unwrap_or(4))
-            .build()
-            .map_err(|e| ZkError::Backend(format!("Failed to create thread pool: {}", e)))?;
 
         // Update resource tracking
         {
@@ -497,39 +438,19 @@ impl ZkBackendExt for Risc0Backend {
             resources.queue_depth = verifications.len();
         }
 
-        // Verify proofs in parallel
-        let results: Vec<ZkResult<bool>> = thread_pool.install(|| {
-            verifications.par_iter().map(|(program, proof)| {
-                let circuit = self.create_circuit(program, &[])?;
-                
-                // Parse receipt
-                let receipt = Receipt::from_bytes(proof)
-                    .map_err(|e| ZkError::Backend(format!("Failed to parse receipt: {}", e)))?;
-                
-                Ok(circuit.verify_receipt(&receipt))
-            }).collect()
-        });
+        // Create futures for all verifications
+        let futures: Vec<_> = verifications.iter().map(|(program, proof)| async {
+            let circuit = self.create_circuit(program, &[]).map_err(|e| 
+                frostgate_zkip::ZkError::Backend(e.to_string()))?;
+            self.verify_internal(circuit.as_ref(), proof).await.map_err(|e| 
+                frostgate_zkip::ZkError::Backend(e.to_string()))
+        }).collect();
 
-        // Update stats
-        let duration = start.elapsed().unwrap_or_default();
-        let success = results.iter().all(|r| r.is_ok());
-        let mut stats = self.stats.write();
-        stats.total_verifications += verifications.len();
-        if !success {
-            stats.total_failures += 1;
-        }
-        let total_verifications: u32 = stats.total_verifications.try_into().unwrap();
-        let prev_verifications: u32 = (stats.total_verifications - verifications.len()).try_into().unwrap();
-        stats.avg_verification_time = (stats.avg_verification_time * prev_verifications + duration) / total_verifications;
+        // Execute all futures concurrently
+        let results = join_all(futures).await;
 
-        // Update resource tracking
-        {
-            let mut resources = self.resources.write();
-            resources.active_tasks -= verifications.len();
-            resources.queue_depth = 0;
-        }
-
-        // Collect results
+        // Update stats and return
+        self.update_verification_stats(start.elapsed().unwrap_or_default(), results.iter().all(|r| r.is_ok())).await;
         results.into_iter().collect()
     }
 
