@@ -25,7 +25,7 @@ struct BlockHeader<'a> {
 
 fn main() {
     // Read block header from private input
-    let header_bytes: Vec<u8> = env::read();
+    let header_bytes: Vec<u8> = env::read();the
     
     // Read expected hash and block number from public input
     let mut expected_hash = [0u8; 32];
